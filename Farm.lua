@@ -1,0 +1,5196 @@
+--[[
+    🍬 Candy Kingdom Defense — Smart Farm v1.6  (NexusLib)
+
+    One script for both places of the game:
+      • Lobby (Tree Fort):  rewards → best team → feed → traits/stats → summon → pick the best mode → launch
+      • Match:              place units on the best road-coverage spots, buy the best DPS-per-coin action,
+                            use abilities, learn each unit's real damage, then replay / next / go home
+
+    Every decision is made from the game's own data (Catalog, UnitBase, UnitStats, hero LEVELS tables,
+    the map's canPlace) and corrected by what actually happened (per-unit measured damage, per-stage
+    win rates and run times). Settings: CKD_SmartFarm/settings.json · learning: CKD_SmartFarm/brain.json
+]]
+
+-- claim the "running" slot synchronously, before any yield, so two queued loaders can't both start
+if _G.CKD_SF and _G.CKD_SF.alive then return end
+local VERSION = "1.7"
+-- what changed, newest first (Updates tab; a one-time notice when a player first runs a new version)
+-- items: { icon, title, text, tag = NEW | IMPROVED | FIX }
+local CHANGELOG = {
+    { v = "1.7", date = "Oct 30, 2026", title = "No More v1.3 Downgrades", items = {
+        { "🧷", "Exact build survives teleports", "The loader caches the exact v1.7 source before execution and Lobby ↔ Match teleports reload that same source.", "FIX" },
+        { "🚫", "Old GitHub fallback removed", "If no custom loadstring URL exists, the farm will never silently fetch the old v1.3 public file.", "FIX" },
+        { "✅", "Version-checked reloads", "Cached/web sources must identify themselves as v1.7 before a teleport reload is allowed to execute.", "NEW" },
+        { "🛟", "Safe failure", "If no valid v1.7 source is available after a teleport, the loader stops instead of downgrading.", "FIX" },
+    } },
+    { v = "1.6", date = "Oct 30, 2026", title = "Pick a map and farm it forever", items = {
+        { "🗺️", "Manual World + Act picker", "Choose the exact normal world and act you want instead of letting the planner choose for you.", "NEW" },
+        { "♻️", "Endless normal replay", "Selected normal stages replay nonstop. The usual lobby-every-N-runs check is bypassed while this mode is on.", "NEW" },
+        { "🎯", "Manual mode has priority", "Your selected stage overrides Story, Farm, raids and Challenge focus until you turn Selected Stage Loop off.", "IMPROVED" },
+        { "🧠", "Smart planner preserved", "Turn the loop off at any time and the existing automatic route planner takes control again.", "IMPROVED" },
+    } },
+    { v = "1.5", date = "Oct 30, 2026", title = "Endless Dungeon Train", items = {
+        { "🚂", "True endless Challenges", "Focus Challenges now rotates through every active Dungeon Train car forever. Claimed bonuses no longer remove a car from the loop.", "FIX" },
+        { "🔄", "Refresh-aware rotation", "After the current cars are cleared, repeats cycle Car 1 → Car 2 → Car 3; when the Train refreshes, the new challenge IDs are discovered automatically.", "NEW" },
+        { "🏠", "Reliable challenge relaunch", "Challenge clears return through the hub and create a fresh challenge match instead of relying on Again to preserve a challenge ID.", "FIX" },
+        { "🧷", "Loadstring survives teleports", "A loader-provided CKD_SF_URL is carried through Lobby ↔ Match teleports, preventing an older GitHub build from silently replacing this version.", "FIX" },
+    } },
+    { v = "1.4", date = "Oct 30, 2026", title = "Challenge Loop + Candy UI", items = {
+        { "🏆", "Challenges keep going", "After the three first-win cars are cleared, Challenge farming can continue on repeat rewards instead of disappearing from the planner.", "FIX" },
+        { "🔁", "Smart challenge replay", "If the best next challenge is the one you just cleared, the farm uses Again immediately; when another car still has a first-win bonus it returns to the Train and switches cars.", "NEW" },
+        { "🍭", "Candy-themed dashboard", "A wider candy-purple UI, cleaner tab names, stronger section hierarchy and a live Dungeon Train card make the menu easier to scan.", "IMPROVED" },
+        { "🎛️", "Challenge behavior control", "Choose First wins only, Keep farming, or Focus challenges from the Play tab. Focus mode keeps Challenge farming ahead of other repeat modes.", "NEW" },
+    } },
+    { v = "1.3", date = "Oct 30, 2026", title = "Halloween Banner", items = {
+        { "🎃", "Halloween Banner pulls", "Spends Halloween Candy on the event banner while it has heroes you don't own (Marshall Lee, Belly Demon 9% each).", "NEW" },
+        { "🧛", "Candy for Vampire King first", "Once Marshall Lee is in, the 5,000 candy his Vampire King evolution needs is kept back.", "NEW" },
+        { "🍬", "Raids while candy has a use", "Raids rank right after challenges while candy still buys something (the banner or an evolution).", "IMPROVED" },
+        { "💰", "Smarter gem value", "With a big pile of gems and nothing to buy, gems count for less, so the farm goes after what you still need.", "IMPROVED" },
+        { "🧊", "Ice maps get plans", "The simulator now matches ice maps too (spawn pace and the farm's own placement rule).", "FIX" },
+    } },
+    { v = "1.2", date = "Oct 29, 2026", title = "A plan for every map", items = {
+        { "🗺️", "Clear planner", "Works out the fastest team and placement for each map. Testing: Goliad's Reign 11% faster, Gumdrop Gauntlet 20% faster.", "NEW" },
+        { "✅", "Only plans where it's right", "Plans only on maps where the simulator's times match your real runs, and drops a plan that turns out slower.", "NEW" },
+        { "♾️", "Infinite planner", "Picks the team and placement that last the most waves.", "NEW" },
+        { "⏱️", "Game speed per map", "Measures how fast each map really runs (the game speeds some up), so plans compare fairly.", "NEW" },
+        { "🌊", "Real wave timing", "The simulator uses the game's real gaps between waves, auto-skip and challenge modifiers.", "IMPROVED" },
+        { "💡", "Suggest box", "Send your ideas for the farm from this tab, anonymously.", "NEW" },
+        { "🔧", "Infinite fix", "Infinite runs were sometimes treated as normal maps.", "FIX" },
+    } },
+    { v = "1.1", date = "Oct 29, 2026", title = "Tournament, Brain Hive, faster clears", items = {
+        { "🥇", "Tournament planner", "Picks the team and placement that deal the most damage, and replays when it can beat your best. Testing: 116M → 148M, rank 181 → 87.", "NEW" },
+        { "💥", "Smarter tournament sim", "Counts knockback, abilities and the week's element bonus, and puts heroes where the waves pile up.", "IMPROVED" },
+        { "🎲", "Trait rolls for tournament heroes", "A tournament hero with no trait or a Common one is rolled up to Rare or better (a few crystals).", "NEW" },
+        { "🧠", "Brain Hive", "Shares anonymous match stats so hero scores improve for everyone. Switch off: Settings → Share anonymous stats.", "NEW" },
+        { "📚", "Learn from the hive", "Blends every player's hero data into your scores, mostly for heroes you rarely play.", "NEW" },
+        { "⏩", "Early wave calls on", "Sends the next wave early when it's safe. Gumdrop Gauntlet: ~210s → 130–154s.", "IMPROVED" },
+        { "🧮", "Better hero scores", "Corrected damage math for area attacks, slows, multi-shots and burn.", "IMPROVED" },
+        { "💎", "Safer trait chases", "Rerolls a Rare+ trait only with enough crystals for a 50% shot at Hero of Ooo (Lobby → Safe Chase Odds).", "IMPROVED" },
+        { "🚧", "Blocked spots remembered", "A spot that blocks a hero twice on a map is skipped from then on.", "IMPROVED" },
+        { "🎃", "Raids call waves early again", "Once the simulator says the team wins with room to spare.", "IMPROVED" },
+        { "🔧", "Discord link", "The Join Discord invite works again.", "FIX" },
+    } },
+    { v = "1.0", date = "Oct 26–28, 2026", title = "Latest additions", items = {
+        { "🌩️", "S-tier evolutions", "Buys and evolves The Dark Cloud, and farms Sandwiches for Cosmic Dog.", "NEW" },
+        { "📜", "Trait History", "The Lobby tab shows where every crystal went.", "NEW" },
+        { "📈", "Full upgrade scoring", "Hero scores count every upgrade level, not just level 1.", "IMPROVED" },
+        { "💬", "Join Discord button", "On the Main tab: copies the community invite.", "NEW" },
+    } },
+}
+local SF = { alive = true, conns = {} }
+_G.CKD_SF = SF
+if not game:IsLoaded() then game.Loaded:Wait() end
+
+local Players = game:GetService("Players")
+local RS = game:GetService("ReplicatedStorage")
+local Http = game:GetService("HttpService")
+local LP = Players.LocalPlayer
+while not LP do task.wait(0.25); LP = Players.LocalPlayer end
+
+-- everything below lives in tables (the main chunk is capped at 200 locals)
+local C = {}   -- game modules / constants
+local CFG = {} -- settings
+local B = {}   -- brain (persisted learning)
+local ST = {}  -- status line per system
+local LOG = { lines = {}, pending = {} }
+local U = {}   -- utilities
+
+C.FOLDER = "CKD_SmartFarm"
+C.SETTINGS = C.FOLDER .. "/settings.json"
+C.BRAIN = C.FOLDER .. "/brain.json"
+C.LOGFILE = C.FOLDER .. "/log.txt"
+C.SELF = "CandyKingdom_SmartFarm.lua"
+C.SELF_CACHE = C.FOLDER .. "/runtime.lua"
+
+-- Teleport persistence must NEVER guess a public fallback URL.  The old repo URL still points to v1.3,
+-- so a missing CKD_SF_URL used to make a new build silently downgrade itself after Lobby <-> Match.
+local CKD_ENV = (getgenv and getgenv()) or _G
+local CKD_CUSTOM_URL = type(CKD_ENV.CKD_SF_URL) == "string" and CKD_ENV.CKD_SF_URL ~= "" and CKD_ENV.CKD_SF_URL
+    or (type(_G.CKD_SF_URL) == "string" and _G.CKD_SF_URL ~= "" and _G.CKD_SF_URL)
+local CKD_SOURCE = type(CKD_ENV.CKD_SF_SOURCE) == "string" and CKD_ENV.CKD_SF_SOURCE
+    or (type(_G.CKD_SF_SOURCE) == "string" and _G.CKD_SF_SOURCE)
+
+C.SELF_URL_CUSTOM = CKD_CUSTOM_URL ~= nil
+C.SELF_URL = CKD_CUSTOM_URL -- nil is intentional: no old-version web fallback
+
+local function CKD_sourceVersion(s)
+    return type(s) == "string" and s:match('local%s+VERSION%s*=%s*"([^"]+)"') or nil
+end
+local function CKD_validSelf(s)
+    return type(s) == "string" and #s > 1000 and CKD_sourceVersion(s) == VERSION
+end
+
+-- The v1.7 loadstring loader supplies the exact downloaded source. Cache it before the first teleport.
+if CKD_validSelf(CKD_SOURCE) then
+    pcall(function()
+        if not isfolder(C.FOLDER) then makefolder(C.FOLDER) end
+        writefile(C.SELF_CACHE, CKD_SOURCE)
+    end)
+end
+
+if C.SELF_URL_CUSTOM then
+    CKD_ENV.CKD_SF_URL = C.SELF_URL
+    _G.CKD_SF_URL = C.SELF_URL
+end
+C.SIM_URL = "https://raw.githubusercontent.com/headshot7535-png/Candy-Kingdom-Defense/main/sim.lua"
+-- every player's combined measurements (CKD_Research/hive/combine.py → hive.json in the repo)
+C.HIVE_URL = "https://raw.githubusercontent.com/headshot7535-png/Candy-Kingdom-Defense/main/hive.json"
+C.HIVE_CACHE = C.FOLDER .. "/hive.json"
+-- community Discord (Main tab → "Join Discord" copies it)
+C.DISCORD_INVITE = "https://discord.com/invite/q2VsNj6x"
+-- author's Discord webhook for the opt-in anonymous stats report (empty = reporting unavailable)
+C.WEBHOOK_URL = "https://discord.com/api/webhooks/1564769639739826316/wqQXo7RAmXrIyDqDzDagzwEEVeZiiPalJ6xlnjdvLOoFvgWI6mR1yvI3VGdMrYHPCDQQ"
+C.NEXUS_URL = "https://raw.githubusercontent.com/headshot7535-png/Nexuslib/main/Nexuslib"
+
+-- ============================================================
+--  DEFAULT SETTINGS
+-- ============================================================
+C.DEFAULTS = {
+    master = true,
+    -- lobby
+    rewards = true, team = true, feed = true, traits = true, stats = true, summon = true,
+    gemReserve = 0,            -- never summon below this
+    summonTen = true,          -- 10-pulls only (450 vs 500 + Epic floor)
+    summonOnlyNew = true,      -- only summon while the banner can give a hero we don't own (base or evolved form)
+    summonNewChance = 0.002,   -- ... with at least this chance per pull (the secret Magic Man's 0.05% doesn't count)
+    fodderMaxRarity = 2,       -- 1 Rare · 2 Epic · 3 Legendary: spare copies up to this get fed
+    keepCopies = 1,            -- spare copies of each kind kept unfed (besides the team)
+    cleanup = true,            -- delete spare copies when the unit backpack is nearly full
+    cleanFree = 20,            -- ... start when fewer than this many slots are free
+    cleanTo = 40,              -- ... and clear until this many are free
+    cleanMaxRarity = 3,        -- ... only copies up to this rarity (1 Rare · 2 Epic · 3 Legendary; Mythic+ never)
+    traitKeep = 3,             -- reroll the trait until it is at least: 2 Rare · 3 Epic · 4 Legendary
+    crystalReserve = 0,
+    statTarget = 36,           -- (old sum rule, unused)
+    statLockAt = 15,           -- (old lock rule, unused)
+    statGoal = 14,             -- chase DMG then SPA to at least this grade (14 = A-, ~9% per roll) with the other two locked
+    statGemFloor = 3000,       -- 2-lock rolls cost 100 gems: keep at least this many gems
+    juiceReserve = 0,
+    lich = true,               -- Lich Lair with a Lich Portal (Lich Ooze + 5% secret Lich Lord)
+    secretValue = 3000,        -- gem-equivalent of a secret hero we don't own (Lich Lord from the Lair)
+    lichHunt = true,           -- until Lich Lord (→ Lich Dog, the strongest evolution) is owned, every Lich Portal
+    lichPortalValue = 2500,    -- ... is worth this much: Infinite (portal drops) then outranks normal farming
+    tourney = true,            -- weekly tournament: until its rewards are in, then again when the team grows
+    tourneyRegrow = 1.15,      -- replay the tournament once team power is this much above the last attempt
+    raids = true,              -- Halloween raid whenever a Raid Key (Bug Milk) is in the bag
+    infKeys = true,            -- out of keys: Infinite in the key world (100% key every 10 waves)
+    keyTarget = 1,             -- farm keys until holding this many
+    raidTeam = "",             -- raid team kinds (empty = your normal best team)
+    -- community tier lists as a team-pick bonus (unit kinds, comma separated): S ×1.25, A ×1.10
+    -- defaults: candy-kingdom-defense.wiki tier list (Oct 26, one list for every mode; Magic Man / King Man unrated)
+    tierStoryS = "HunsonDemon,DeathMetal,CandyElemental,VampireKingCloud,Death,JakeTheLich,AlienJake",
+    tierStoryA = "MarshallLeeVampireKing,KingBMO,PrismRainicorn,VampireKing,Hunson,MarcelineBeast",
+    tierTourneyS = "HunsonDemon,DeathMetal,CandyElemental,VampireKingCloud,Death,JakeTheLich,AlienJake",
+    tierTourneyA = "MarshallLeeVampireKing,KingBMO,PrismRainicorn,VampireKing,Hunson,MarcelineBeast",
+    raidMinMargin = 1.15,      -- only raid when the battle sim wins with at least this enemy-HP headroom
+    raidPlace = "entrance",    -- raid placement (sim: fastest clear, same margin as front)
+    codes = "RELEASE HALLOWEENSOON THANKSFOR200LIKES THANKSFOR100CCU MATHEMATICAL ALGEBRAIC SORRYFORBUGS THXFOR5KCCU HALLOWEEN",
+    evolve = true,             -- evolve heroes when the items + gems are in
+    evoItemValue = 100,        -- gem-equivalent value of an evolution item you still need
+    evoFocus = "JakeTheLich",  -- the one evolution to rush (its items, crafted ones included, count 3x): Lich Lord → Lich Dog
+    sTierEvolve = true,        -- evolutions into S-tier heroes (Story tier list) are always done, even when raw stats miss their abilities
+    sTierItemValue = 1000,     -- ... and their missing items are worth this much (Sandwiches → Ice Kingdom Act 5 for Cosmic Dog)
+    teller = true,             -- Teller's candy shop: Elder Vampire + 5 Vampire Essence (→ The Dark Cloud) once 20,000 Halloween Candy is in
+    sTierCandyValue = 3,       -- ... until then each Halloween Candy is worth this many gems (raids keep running after the Demon Lord)
+    eventBanner = true,        -- pull the event banner (Halloween Candy) while it has heroes we don't own
+    bannerNewChance = 0.02,    -- ... at least this chance per pull of a new hero (Marshall Lee / Belly Demon 9% each)
+    gemIdle = 30000,           -- gems above this, with nothing to spend them on, count for less in the mode ranking
+    gemIdleValue = 0.3,        -- ... this much each (so the farm goes after portals, candy, crystals instead)
+    -- modes
+    goal = 1,                  -- 1 Progress (clear maps fast, farm only to break walls) · 2 Gems per minute
+    play = true, story = true, farm = true, challenges = true, infinite = false,
+    challengeMode = 3,         -- 1 first wins only · 2 keep farming repeats · 3 endless Dungeon Train loop
+    normalLoop = false,        -- manually selected normal World + Act overrides the planner and replays forever
+    normalWorld = 1,           -- index in the playable normal-world list below
+    normalAct = 1,             -- act index inside that world
+    exploreBonus = 0.25,       -- optimism for modes with few runs (UCB weight)
+    progressValue = 120,       -- gem-equivalent value of unlocking a new stage (Gems goal)
+    switchMargin = 10,         -- % better needed to leave the match place for another mode
+    hubEvery = 8,              -- go back to the lobby at least every N matches (banks feed / candy / rerolls)
+    -- battle
+    battle = true, place = true, upgrade = true, abilities = true, autoStart = true,
+    abilityTiming = true,      -- hold a ready ability for a crowd or a boss in its range
+    abilityHold = 25,          -- ... but never longer than this many seconds while anything is in range
+    earlyCall = true,          -- call the next wave early (measured Oct 2026: Gumdrop Gauntlet ~210s → 130–154s, 0 leaks; some maps keep their clock)
+    passives = true,           -- use pair passives (team pick + placing partners within range of each other)
+    scorePath = true,          -- hero score counts the whole upgrade path (late-level area attacks, stuns, burns), not just level 1
+    hubMinPulls = 3,           -- a lobby trip just to summon needs gems for at least this many 10-pulls (a trip costs ~22s vs `next`)
+    traitChaseAt = 20,         -- with this many crystals, chase Legendary+ traits on the strongest heroes
+    traitChaseKeep = 4,        -- chase until this trait rarity: 4 Legendary (Hero of Ooo) · 5 Mythic (Oh My Glob)
+    traitChaseTop = 3,         -- how many of the strongest team heroes get chased to Legendary
+    traitChaseOdds = 0.5,      -- a hero with a Rare+ trait to lose is chased only when the crystals land Hero of Ooo this often
+    traitRollsPerVisit = 1000, -- a Legendary chase runs to the end in one visit (a half-done chase leaves a Common trait)
+    globChase = true,          -- then save up and chase Oh My Glob (+200% dmg) on the strongest hero
+    globChaseAt = 700,         -- start a Glob chase with this many crystals (~70% chance at 0.2%/roll)
+    globFloor = 150,           -- stop a Glob chase here (enough to re-roll a Legendary if it misses)
+    globRollsPerVisit = 2000,  -- rolls per lobby visit during a Glob chase: finish it in one visit, so the hero never
+                               -- plays matches on a half-chased (often Common) trait; the floor stops it
+    callAlive = 8,             -- ... at most this many enemies alive
+    callReach = 0.5,           -- ... and the furthest enemy is at most this far down the road
+    smartTarget = true,        -- heavy hitters target the strongest enemy, fast hitters the first
+    sellIdle = true,           -- sell heroes that never get a target to fund a better buy
+    saveRatio = 0.7,           -- buy an affordable action if it is worth ≥ this share of the best one
+    gridStep = 3,
+    -- misc
+    antiAfk = true, logConsole = false, logLevel = 1,
+    shareStats = true,         -- send anonymous game stats to the script author (Settings → Help improve the script turns it off)
+    shareEvery = 60,           -- minutes between summary reports
+    useHive = true,            -- blend the hive's hero measurements (GitHub hive.json) into the scores
+    clearPlans = true,         -- battle sim plans each map's fastest team + placement (only where it matches real times)
+    shareBatch = 5,            -- match records per Discord message (also sent after 20 min with fewer)
+    shareChosen = false,       -- the player flipped the sharing toggle themselves: their choice is kept forever
+    shareNoticed = false,      -- the one-time "sharing is on" notice was shown
+}
+
+-- gem-equivalent values of items (used to compare rewards across modes)
+C.ITEM_VALUE = { candy = 15, bigcandy = 60, crystal = 35, statroll = 25, page = 10, lichportal = 40, raidkey = 40, hwcandy = 1 }
+C.RARITY_BONUS = { Rare = 1, Epic = 1.25, Legendary = 1.55, Mythic = 1.95, Secret = 2.4 }
+
+-- ============================================================
+--  UTILITIES / FILES / LOG
+-- ============================================================
+function U.now() return os.clock() end
+function U.json(t) local ok, j = pcall(Http.JSONEncode, Http, t); return ok and j or "{}" end
+function U.unjson(s) local ok, t = pcall(Http.JSONDecode, Http, s); return ok and t or nil end
+function U.readJson(path)
+    local ok, src = pcall(function() return isfile(path) and readfile(path) or nil end)
+    return ok and src and U.unjson(src) or nil
+end
+function U.writeJson(path, t)
+    pcall(function() if not isfolder(C.FOLDER) then makefolder(C.FOLDER) end end)
+    pcall(writefile, path, U.json(t))
+end
+function U.fmt(n)
+    n = tonumber(n) or 0
+    if n >= 1e6 then return string.format("%.2fM", n / 1e6) end
+    if n >= 1e4 then return string.format("%.1fk", n / 1e3) end
+    return tostring(math.floor(n + 0.5))
+end
+function U.clamp(x, a, b) return math.max(a, math.min(b, x)) end
+function U.count(t) local n = 0; for _ in pairs(t or {}) do n = n + 1 end; return n end
+
+function SF.log(level, sys, msg)
+    if level > (CFG.logLevel or 1) then return end
+    local line = string.format("[%s] %-7s %s", os.date("%H:%M:%S"), sys, tostring(msg))
+    table.insert(LOG.lines, line)
+    if #LOG.lines > 250 then table.remove(LOG.lines, 1) end
+    table.insert(LOG.pending, line)
+    -- problems are kept for the optional anonymous report (Settings → Share anonymous stats)
+    local low = tostring(msg):lower()
+    if low:find("refused") or low:find("error") or low:find("no progress") or low:find("crashed") or low:find("problem:") or sys == "FATAL" then
+        LOG.problems = LOG.problems or {}
+        table.insert(LOG.problems, line)
+        if #LOG.problems > 30 then table.remove(LOG.problems, 1) end
+    end
+    if CFG.logConsole then print("[CKD] " .. line) end
+end
+function SF.status(sys, msg) ST[sys] = msg end
+
+function SF.flush()
+    if #LOG.pending == 0 then return end
+    local chunk = table.concat(LOG.pending, "\n") .. "\n"
+    table.clear(LOG.pending)
+    pcall(function()
+        if not isfolder(C.FOLDER) then makefolder(C.FOLDER) end
+        if appendfile and isfile(C.LOGFILE) then appendfile(C.LOGFILE, chunk) else writefile(C.LOGFILE, chunk) end
+    end)
+end
+task.spawn(function()
+    while SF.alive do task.wait(3); SF.flush() end
+end)
+
+-- settings
+do
+    local saved = U.readJson(C.SETTINGS) or {}
+    -- settings v2 changed a few defaults; older saved values for those are dropped once
+    if (tonumber(saved.cfgv) or 1) < 2 then saved.hubEvery = nil end
+    if (tonumber(saved.cfgv) or 1) < 3 then saved.earlyCall = nil; saved.hubEvery = nil end
+    if (tonumber(saved.cfgv) or 1) < 4 then saved.hubEvery = nil; saved.hubMinPulls = nil end
+    if (tonumber(saved.cfgv) or 1) < 5 then saved.raidTeam = nil end
+    if (tonumber(saved.cfgv) or 1) < 6 then saved.traitChaseTop = nil end
+    if (tonumber(saved.cfgv) or 1) < 8 then saved.evoFocus = nil end
+    if (tonumber(saved.cfgv) or 1) < 9 then saved.globRollsPerVisit = nil end
+    if (tonumber(saved.cfgv) or 1) < 10 then saved.traitRollsPerVisit = nil; saved.traitChaseTop = nil end
+    if (tonumber(saved.cfgv) or 1) < 11 then saved.earlyCall = nil end -- early calls are on by default now
+    -- sharing became on by default: only players who never touched the toggle get the new default
+    if saved.shareChosen ~= true then saved.shareStats = nil end
+    for k, v in pairs(C.DEFAULTS) do
+        if saved[k] ~= nil and type(saved[k]) == type(v) then CFG[k] = saved[k] else CFG[k] = v end
+    end
+    CFG.cfgv = 12
+end
+SF.saveAt = nil
+function SF.saveSoon() SF.saveAt = U.now() + 1.5 end
+function SF.saveNow() U.writeJson(C.SETTINGS, CFG); U.writeJson(C.BRAIN, B); SF.flush() end
+
+-- brain
+do
+    -- how the save file looked when it was read: a player whose learning keeps vanishing needs this in the report
+    local rawOk, raw = pcall(function() return isfile(C.BRAIN) and readfile(C.BRAIN) or nil end)
+    local b = U.readJson(C.BRAIN)
+    SF.brainLoad = { bytes = rawOk and raw and #raw or 0, decoded = b ~= nil, readOk = rawOk,
+        stages = b and type(b.stages) == "table" and U.count(b.stages) or 0, kinds = b and type(b.kinds) == "table" and U.count(b.kinds) or 0 }
+    b = b or {}
+    B.loads = (tonumber(b.loads) or 0) + 1                    -- times this save file was loaded (each teleport / execute)
+    B.resets = type(b.resets) == "table" and b.resets or {}   -- {what, at}: Reset buttons pressed
+    B.stages = type(b.stages) == "table" and b.stages or {}   -- [modeKey] = {runs, wins, sec, waves, last}
+    B.v = 5
+    B.kinds = (b.v == 5 and type(b.kinds) == "table") and b.kinds or {} -- [kind] = {eff, n, att}  measured / predicted damage share
+    B.prof = type(b.prof) == "table" and b.prof or {}         -- cached lobby profile bits for match-side decisions
+    B.matches = tonumber(b.matches) or 0
+    B.sinceHub = tonumber(b.sinceHub) or 0
+    B.totals = type(b.totals) == "table" and b.totals or { wins = 0, losses = 0, summons = 0, feeds = 0, rerolls = 0, gems = 0 }
+    B.pending = type(b.pending) == "table" and b.pending or nil -- mode we launched (for the result)
+    B.lastPower = tonumber(b.lastPower)
+    B.evoNeeds = type(b.evoNeeds) == "table" and b.evoNeeds or {}
+    -- S-tier items + who needs them: the match ranks modes with these too (else a Sandwich farm run looks
+    -- worthless from the match and every run ends with a lobby trip just to pick it again)
+    B.sTierNeeds = type(b.sTierNeeds) == "table" and b.sTierNeeds or {}
+    B.evoNeedFor = type(b.evoNeedFor) == "table" and b.evoNeedFor or {}
+    B.rows = type(b.rows) == "table" and b.rows or {}
+    B.codes = type(b.codes) == "table" and b.codes or {}
+    B.raidSim = type(b.raidSim) == "table" and b.raidSim or nil -- {margin, team, at, wave}
+    B.raidSimNote = type(b.raidSimNote) == "table" and b.raidSimNote or nil -- {text, at}: what the raid gate last did
+    B.globChasing = b.globChasing                                 -- unit id mid Oh-My-Glob chase
+    B.statChase = type(b.statChase) == "table" and b.statChase or nil -- {id, stat} mid stat chase
+    B.raidBest = type(b.raidBest) == "string" and b.raidBest or nil  -- sim-picked raid team kinds
+    B.tourney = type(b.tourney) == "table" and b.tourney or {}       -- {week, power, at} of the last attempt
+    B.tourneyInfo = type(b.tourneyInfo) == "table" and b.tourneyInfo or nil -- last GetTourney {week, mine}
+    B.tourneySim = type(b.tourneySim) == "table" and b.tourneySim or nil   -- planner {week, team, strat, score, sig, at, cal}
+    B.blocked = type(b.blocked) == "table" and b.blocked or {}               -- [map] = {"x,z" = runs it refused a hero}
+    B.clearPlan = type(b.clearPlan) == "table" and b.clearPlan or {}         -- [modeKey] = clear plan (MT.clearCheck)
+    B.raidAggrReset = b.raidAggrReset                                        -- raid early-call boldness re-learned once
+    B.lastResult = type(b.lastResult) == "table" and b.lastResult or nil   -- last run's result line (GUI)
+    B.challengeLast = b.challengeLast                         -- last Dungeon Train challenge id launched (round-robin cursor)
+    B.lastReport = tonumber(b.lastReport) or 0                              -- last anonymous stats report (opt-in)
+    B.powerHub = b.powerHub == true
+    B.traitLog = type(b.traitLog) == "table" and b.traitLog or nil         -- trait chases {at, clock, kind, goal, rolls, spent, from, to, hit}
+    B.paths = type(b.paths) == "table" and b.paths or nil                 -- [kind] = upgrade-path factor, _median (MT.learnPaths)
+    B.modelV = tonumber(b.modelV) or 1                                    -- damage formula the learning was measured against
+    -- shared stats: a random id made once per install (no user id inside), match records waiting to be sent
+    B.anonId = type(b.anonId) == "string" and b.anonId or Http:GenerateGUID(false):gsub("-", ""):sub(1, 10):lower()
+    B.hiveQueue = type(b.hiveQueue) == "table" and b.hiveQueue or {}
+    B.lastHive = tonumber(b.lastHive) or 0
+    B.lastSuggest = tonumber(b.lastSuggest) or 0                           -- last suggestion sent (one per 10 min)
+end
+task.spawn(function()
+    while SF.alive do
+        task.wait(1)
+        if SF.saveAt and U.now() >= SF.saveAt then SF.saveAt = nil; SF.saveNow() end
+    end
+end)
+
+-- ============================================================
+--  REQUEST LAYER (cooldown · backoff · logging)
+-- ============================================================
+SF.req = { last = {}, back = {}, fails = {} }
+function SF.request(key, remote, ...)
+    local r = SF.req
+    local t = U.now()
+    if r.back[key] and t < r.back[key] then return nil, "backoff" end
+    if not remote then return nil, "no remote" end
+    local args = table.pack(...)
+    local ok, res = pcall(function()
+        if remote:IsA("RemoteFunction") then return remote:InvokeServer(table.unpack(args, 1, args.n)) end
+        remote:FireServer(table.unpack(args, 1, args.n))
+        return { ok = true }
+    end)
+    r.last[key] = t
+    if not ok then
+        r.fails[key] = (r.fails[key] or 0) + 1
+        r.back[key] = t + math.min(60, 2 ^ r.fails[key])
+        SF.log(1, "NET", key .. " errored: " .. tostring(res))
+        return nil, tostring(res)
+    end
+    if type(res) == "table" and res.ok == false then
+        r.fails[key] = (r.fails[key] or 0) + 1
+        r.back[key] = t + math.min(30, 0.5 * 2 ^ math.min(r.fails[key], 6))
+        return res, tostring(res.reason or "refused")
+    end
+    r.fails[key] = 0
+    return res, nil
+end
+function SF.backoff(key, sec) SF.req.back[key] = U.now() + sec end
+
+-- ============================================================
+--  PLACE DETECTION + GAME MODULES
+-- ============================================================
+C.PLACE_HUB = 111053011787075
+C.PLACE_MATCH = 90286053025127
+do
+    local hubFolder = RS:FindFirstChild("Hub")
+    local tdFolder = RS:WaitForChild("CandyTD", hubFolder and 3 or 60)
+    if RS:FindFirstChild("MatchRemotes") or (tdFolder and not RS:FindFirstChild("HubRemotes")) then
+        SF.where = "match"
+        C.root = tdFolder
+        C.remotes = RS:WaitForChild("MatchRemotes", 30)
+    else
+        SF.where = "hub"
+        C.root = RS:WaitForChild("Hub", 30)
+        C.remotes = RS:WaitForChild("HubRemotes", 30)
+    end
+    C.Catalog = require(C.root:WaitForChild("Catalog"))
+    pcall(function() C.UnitStats = require(C.root:WaitForChild("UnitStats", 5)) end)
+    pcall(function() local m = C.root:FindFirstChild("UnitBase"); C.UnitBase = m and require(m) or nil end)
+    C.PLACE_HUB = C.Catalog.PLACES and C.Catalog.PLACES.hub or C.PLACE_HUB
+    C.PLACE_MATCH = C.Catalog.PLACES and C.Catalog.PLACES.match or C.PLACE_MATCH
+end
+-- remotes live in several folders (HubRemotes, RewardRemotes, PassRemotes, ...): main folder first, then any *Remotes
+function C.R(name)
+    local r = C.remotes and C.remotes:FindFirstChild(name)
+    if r then return r end
+    for _, f in ipairs(RS:GetChildren()) do
+        if f:IsA("Folder") and f.Name:match("Remotes$") then
+            local x = f:FindFirstChild(name)
+            if x then return x end
+        end
+    end
+    return nil
+end
+-- copy the lobby's base attack rows so match-side scores use the same numbers
+if C.UnitBase and C.UnitBase.ROWS then
+    for kind, r in pairs(C.UnitBase.ROWS) do B.rows[kind] = { dmg = r.dmg, range = r.range, cd = r.cd } end
+end
+
+-- ============================================================
+--  SHARED MODEL: unit power, trait value, stage difficulty, rewards
+-- ============================================================
+C.M = {}
+function C.M.traitValue(id)
+    local t = id and C.Catalog.TRAITS[id]
+    if not t then return 0 end
+    return (t.dmg or 0) + 0.7 * (t.speed or 0) + 0.35 * (t.range or 0) + 0.5 * (-(t.cost or 0))
+end
+function C.M.traitOrder(id) return C.Catalog.traitOrder and C.Catalog.traitOrder(id) or 0 end
+-- Is a chase for `keep`+ (4 = Hero of Ooo) worth it with n crystals? A reroll replaces the trait (no keeping
+-- the old one), so a missed chase leaves a random trait, 54% Common. Legendary+ is 1% a roll: 20 rolls land
+-- it 18% of the time. Returns the hit chance, the trait value expected after the chase, the value now, and
+-- the fewest rolls that make the chase clearly better than keeping the current trait (nil = never)
+function C.M.chaseOdds(cur, n, luck, keep)
+    local hitP, hitV, missP, missV = 0, 0, 0, 0
+    for _, t in ipairs(C.Catalog.TRAIT_ORDER) do
+        local c = C.Catalog.traitChance(t, luck)
+        if C.M.traitOrder(t) >= keep then hitP = hitP + c; hitV = hitV + c * C.M.traitValue(t)
+        else missP = missP + c; missV = missV + c * C.M.traitValue(t) end
+    end
+    hitV = hitP > 0 and hitV / hitP or 0
+    missV = missP > 0 and missV / missP or 0
+    local curV = C.M.traitValue(cur)
+    local function after(k) local p = 1 - (1 - hitP) ^ math.max(0, k); return p * hitV + (1 - p) * missV, p end
+    -- Glob's +200% makes almost any chase look good on average, so a hero with a Rare+ trait to lose also
+    -- needs the chase to land at least CFG.traitChaseOdds of the time (50% = 69 crystals); a Common one doesn't
+    local minP = C.M.traitOrder(cur) >= 2 and CFG.traitChaseOdds or 0
+    local function ok(k) local a, p = after(k); return a > curV * 1.05 + 0.01 and p >= minP end
+    local need
+    for k = 1, 3000 do if ok(k) then need = k break end end
+    local a, p = after(n)
+    return p, a, curV, need, ok(n)
+end
+function C.M.gradeMults(g)
+    if C.UnitStats and g then return C.UnitStats.mults(g) end
+    return { dmg = 1, range = 1, speed = 1 }
+end
+-- measured / predicted damage, per kind and per attack (punch vs tornado...), relative to the average
+-- so one global scale (overkill on easy waves) doesn't matter
+-- the hive's view of a hero: measured / predicted damage relative to each player's own average (median over
+-- players, CKD_Research/hive/combine.py), and how many waves it's worth next to our own measurements: at most
+-- 150, ×0.3 per hive wave, scaled down when fewer than 3 players back it. nil = nothing usable
+function C.M.hiveRel(kind)
+    local d = SF.HIVE and SF.HIVE.data
+    local h = d and type(d.kinds) == "table" and d.kinds[kind]
+    local rel, waves, players = h and tonumber(h.rel), h and tonumber(h.waves) or 0, h and tonumber(h.players) or 0
+    if not (rel and rel > 0 and waves >= 30 and CFG.useHive) then return nil end
+    return rel, math.min(150, waves * 0.3) * math.min(1, players / 3)
+end
+function C.M.kindEff(kind, attack)
+    local k = B.kinds[kind]
+    local hRel, hW = C.M.hiveRel(kind)
+    if (not k or (k.n or 0) < 1) and not hRel then return 1 end
+    if not k or (k.n or 0) < 1 then
+        -- never measured here: the hive alone, eased in against a neutral 150-wave prior (one player's 300
+        -- waves moves a hero a little, many players' thousands most of the way)
+        local w = math.min(1, hW / 500)
+        return U.clamp((hRel ^ (hW / (hW + 150))) ^ 0.5, 0.8 - 0.25 * w, 1.35 + 0.65 * w)
+    end
+    local sum, n = 0, 0
+    for _, v in pairs(B.kinds) do if (v.n or 0) >= 1 then sum = sum + v.eff; n = n + 1 end end
+    local avg = n > 0 and sum / n or 1
+    local e = k.eff
+    local a = attack and type(k.att) == "table" and k.att[attack]
+    if a and (a.n or 0) >= 1 then e = a.eff end
+    if hRel then
+        -- blend in log space, weighted by waves: our own count fully, the hive up to its weight
+        local nl = k.n or 0
+        local rl = math.max(e / math.max(avg, 1e-3), 1e-3)
+        local rel = math.exp((nl * math.log(rl) + hW * math.log(hRel)) / (nl + hW))
+        local w = math.min(1, (nl + hW) / 500)
+        return U.clamp(rel ^ 0.5, 0.8 - 0.25 * w, 1.35 + 0.65 * w)
+    end
+    -- measured damage is HP actually removed, so on easy waves a big single hit (Talon Dive 2.5k into a
+    -- 300 HP enemy) mostly overkills and reads ~0.35, while splash reads high. That's true on easy maps and
+    -- wrong where big hits matter (bosses, late Infinite, the raid). Treat it as a nudge, not a verdict:
+    -- square-root it and keep it within ×0.8–×1.35 of the game's own stats; a hero measured over many waves
+    -- (the learning rate slows with samples, so 500+ waves is a steady average) is trusted up to ×0.55–×2.0
+    local w = math.min(1, (k.n or 0) / 500)
+    return U.clamp((e / math.max(avg, 1e-3)) ^ 0.5, 0.8 - 0.25 * w, 1.35 + 0.65 * w)
+end
+-- lobby-side unit score: level-1 placement DPS (the game's own UnitBase.placement), range, copies allowed,
+-- rarity (upgrade paths scale with rarity) and the measured in-match efficiency of the kind
+-- pair passive (Catalog.PASSIVES) as a single strength factor: active when a partner kind is present
+-- (kinds = set of kinds on the team / within PASSIVE_RADIUS). dmg counts fully, range via √ like unitScore
+function C.M.passive(kind)
+    if not C.Catalog.passiveOf then return nil end
+    local def, unit = C.Catalog.passiveOf(kind)
+    return def, unit
+end
+function C.M.passiveMult(kind, kinds)
+    if not CFG.passives then return 1 end
+    local def, unit = C.M.passive(kind)
+    if not (def and unit) then return 1 end
+    local on = def.solo == true
+    for _, w in ipairs(unit.with or {}) do if kinds[w] then on = true break end end
+    if not on then return 1 end
+    return (unit.dmg or 1) * math.sqrt(unit.range or 1) * (unit.hold and 1.1 or 1) * (unit.money and 1.05 or 1)
+end
+
+-- level-1 attack row: Hub/UnitBase in the lobby, the hero's own LEVELS[1] in the match (same numbers)
+function C.M.baseRow(kind)
+    if C.UnitBase and C.UnitBase.ROWS and C.UnitBase.ROWS[kind] then return C.UnitBase.ROWS[kind] end
+    -- the match place has no UnitBase: use the copy the lobby saved into the brain file
+    local saved = B.rows and B.rows[kind]
+    if saved and saved.dmg then return saved end
+    local mod = C.root:FindFirstChild(kind .. "TD")
+    local ok, t = pcall(function() return mod and require(mod) end)
+    local L = ok and type(t) == "table" and t.LEVELS
+    return L and L[1] or nil
+end
+-- full upgrade path: what a hero does once upgraded (area, extra targets, stuns, burns, summons: the game's
+-- own LEVELS rows through MT.rowDps) relative to the level-1 single-target hit unitScore starts from.
+-- Measured in a match (MT.learnPaths), saved for the lobby; relative to the median hero, unknown kinds = 1
+function C.M.pathFactor(kind)
+    local P = B.paths
+    if not (CFG.scorePath and P and P._median) then return 1 end
+    return (P[kind] or P._median) / P._median
+end
+-- noPath: the level-1 score only (team power records compare against old values in that scale)
+function C.M.unitScore(u, noEff, noPath)
+    if not u or not u.kind then return 0 end
+    local info = C.Catalog.UNITS[u.kind]
+    local row = C.M.baseRow(u.kind)
+    local s
+    if row then
+        -- UnitBase.placement: dmg × damageMult(level) × trait × grade, range × trait × grade, cd ÷ speed
+        local tm = C.Catalog.traitMults(u.trait)
+        local gm = C.M.gradeMults(u.g)
+        local dmg = row.dmg * C.Catalog.damageMult(u.level or 1) * tm.dmg * gm.dmg
+        local range = row.range * tm.range * gm.range
+        local cd = row.cd / (tm.speed * gm.speed)
+        s = dmg / math.max(cd, 0.1) * math.sqrt(range / 24)
+    else
+        local tm = C.Catalog.traitMults(u.trait)
+        s = 40 * C.Catalog.damageMult(u.level or 1) * tm.dmg
+    end
+    local cap = C.Catalog.placeCap(u.kind)
+    s = s * (1 + 0.18 * (cap - 1))
+    s = s * (C.RARITY_BONUS[info and info.rarity or "Rare"] or 1)
+    if not noPath then s = s * C.M.pathFactor(u.kind) end
+    if noEff then return s end
+    return s * C.M.kindEff(u.kind)
+end
+function C.M.ownsAny(kinds)
+    for _, u in pairs(B.prof and B.prof.units or {}) do
+        if table.find(kinds, u.kind) then return true end
+    end
+    return false
+end
+-- the event banner's heroes we don't own yet (owning one's evolution counts): chance per pull, kinds
+function C.M.bannerNew(p)
+    local Cat = C.Catalog
+    if not (Cat.EVENT_BANNER and Cat.eventPool and Cat.eventOn and Cat.eventOn()) then return 0, {} end
+    local own = {}
+    for _, u in pairs(p and p.units or {}) do own[u.kind] = true end
+    for target, def in pairs(Cat.EVOLUTIONS or {}) do if own[target] then own[def.from] = true end end
+    local ok, pool = pcall(Cat.eventPool)
+    local total, new = 0, {}
+    for _, e in ipairs(ok and type(pool) == "table" and pool or {}) do
+        if e.unit and e.hero and not own[e.hero] then total = total + (tonumber(e.chance) or 0); table.insert(new, e.hero) end
+    end
+    return total, new
+end
+-- Halloween Candy an evolution we can work toward still needs (Marshall Lee → Vampire King: 5,000)
+function C.M.candyReserve(p)
+    local need = 0
+    for _, e in ipairs(C.EVO.list(p)) do
+        local n = e.gain > 0 and tonumber(e.flat and e.flat.hwcandy) or 0
+        if n > need then need = n end
+    end
+    return need
+end
+-- what Halloween Candy is still for while the event runs (nil = nothing): the Teller's Dark Cloud, an
+-- evolution that needs candy, or event-banner heroes we don't own
+function C.M.candyGoal()
+    if not (C.Catalog.eventOn and C.Catalog.eventOn()) then return nil end
+    if CFG.teller and CFG.sTierEvolve and not C.M.ownsAny({ "VampireKingCloud" }) then return "The Dark Cloud (bought at the Teller)" end
+    local evo = (B.evoNeeds or {}).hwcandy and (B.evoNeedFor or {}).hwcandy
+    if evo then return (C.Catalog.UNITS[evo] and C.Catalog.UNITS[evo].name or evo) .. " (evolution)" end
+    if CFG.eventBanner then
+        local chance, new = C.M.bannerNew(B.prof)
+        if chance >= CFG.bannerNewChance then return "the Halloween Banner (" .. table.concat(new, ", ") .. ")" end
+    end
+    return nil
+end
+-- gems count for less while there's nothing to spend them on (a big pile, the banner has nothing new, no
+-- evolution waiting on gems): then the ranking prefers modes that pay what's still missing
+function C.M.gemValue(p)
+    p = p or B.prof
+    -- an evolution's gem price (a few thousand) only matters while the pile is close to it
+    local reserved = CFG.evolve and (C.EVO.gemReserve(p) or 0) or 0
+    if (tonumber(p and p.gems) or 0) - reserved < CFG.gemIdle then return 1 end
+    local okS, worth = pcall(C.M.summonNew, p)
+    if CFG.summon and okS and worth then return 1 end
+    return CFG.gemIdleValue
+end
+function C.M.itemsValue(items)
+    local v = 0
+    local needs = B.evoNeeds or {}
+    -- the focus evolution's items (crafted ones broken down into their inputs) are valued 3x
+    local focus = C.Catalog.EVOLUTIONS and C.Catalog.EVOLUTIONS[CFG.evoFocus or ""]
+    local fItems = focus and C.EVO.expand(focus.items, B.prof) or {}
+    if fItems.lichooze then fItems.lichportal = 1 end
+    -- XP candy is worth nothing while every team hero is at the level cap
+    local maxed = true
+    local cap = C.Catalog.LEVEL and C.Catalog.LEVEL.max or 50
+    for _, id in ipairs(B.prof and B.prof.slots or {}) do
+        local u = B.prof.units and B.prof.units[id]
+        if u and (tonumber(u.level) or 1) < cap then maxed = false end
+    end
+    for k, n in pairs(items or {}) do
+        local each = C.ITEM_VALUE[k] or 20
+        if maxed and (k == "candy" or k == "bigcandy") then each = 2 end
+        -- Halloween Candy comes by the thousand: its value is per candy (below), never an evolution item's
+        local mass = k == "hwcandy"
+        -- items an evolution we can work toward still needs are worth a lot more
+        if needs[k] and not mass then each = math.max(each, k == "page" and CFG.evoItemValue * 0.4 or CFG.evoItemValue) end
+        local held = tonumber(B.prof and B.prof.items and B.prof.items[k]) or 0
+        if needs[k] and fItems[k] and held < fItems[k] and k ~= "page" and not mass then each = each * 3 end
+        if (B.sTierNeeds or {})[k] and not mass then each = math.max(each, CFG.sTierItemValue) end
+        -- saving candy (The Dark Cloud, an evolution, the banner): candy counts, a raid key is worth its raid's candy
+        if C.M.candyGoal() then
+            local RAID = C.Catalog.RAID
+            if k == "hwcandy" then each = CFG.sTierCandyValue end
+            if k == "raidkey" and RAID then each = math.max(each, (RAID.perWave or 25) * (RAID.waves or 15) * CFG.sTierCandyValue) end
+        end
+        -- a needed Lich Portal is the only gate to Lich Ooze: twice a focus item, plus the Lich Lord chance
+        if k == "lichportal" and needs.lichportal then each = CFG.evoItemValue * 6 + CFG.secretValue * 0.05 end
+        -- Lich Lord hunt: each portal is a 5% shot at the base of Lich Dog
+        if k == "lichportal" and CFG.lichHunt and not C.M.ownsAny({ "Lich", "JakeTheLich" }) then each = math.max(each, CFG.lichPortalValue) end
+        v = v + each * (tonumber(n) or 0)
+    end
+    return v
+end
+
+-- evolutions: Catalog.EVOLUTIONS[target] = {from, with?, gems?, items}
+C.EVO = {}
+-- an evolution's items with crafted ones (Mars Seal...) replaced by what the Crafting Table needs for
+-- the copies we don't hold yet. Returns the flat need table and the crafts to make {id, count}
+function C.EVO.expand(items, prof)
+    local held = prof and prof.items or {}
+    local flat, crafts = {}, {}
+    for k, n in pairs(items or {}) do
+        local have = tonumber(held[k]) or 0
+        local recipe = have < n and C.Catalog.craftRecipe and C.Catalog.craftRecipe(k)
+        if recipe then
+            local missing = math.ceil((n - have) / (recipe.count or 1))
+            if have > 0 then flat[k] = (flat[k] or 0) + have end
+            for ik, in_ in pairs(recipe.items or {}) do flat[ik] = (flat[ik] or 0) + in_ * missing end
+            table.insert(crafts, { id = k, count = missing })
+        else
+            flat[k] = (flat[k] or 0) + n
+        end
+    end
+    return flat, crafts
+end
+function C.EVO.list(prof)
+    local out = {}
+    if not (prof and prof.units and C.Catalog.EVOLUTIONS) then return out end
+    local owned = {}
+    for id, u in pairs(prof.units) do
+        local s = C.M.unitScore(u)
+        if not owned[u.kind] or s > owned[u.kind].s then owned[u.kind] = { id = id, s = s, u = u } end
+    end
+    local items = prof.items or {}
+    for target, def in pairs(C.Catalog.EVOLUTIONS) do
+        local base = owned[def.from]
+        local partner = def.with and owned[def.with]
+        if base and not def.testers and C.Catalog.UNITS[target] and (not def.with or (partner and partner.id ~= base.id)) then
+            local have, need = 0, 0
+            local flat, crafts = C.EVO.expand(def.items, prof)
+            for k, n in pairs(flat) do need = need + n; have = have + math.min(n, tonumber(items[k]) or 0) end
+            local evolved = { kind = target, level = base.u.level, trait = base.u.trait, g = base.u.g }
+            -- the team holds one of each kind: a second copy of an evolved hero is only worth it if it beats the one we have
+            local dupe = owned[target] and C.M.unitScore(evolved, true) <= C.M.unitScore(owned[target].u, true)
+            if not dupe then
+            table.insert(out, {
+                target = target, def = def, base = base, partner = partner,
+                flat = flat, crafts = crafts,
+                progress = need > 0 and have / need or 1,
+                itemsReady = have >= need,
+                ready = have >= need and (tonumber(prof.gems) or 0) >= (def.gems or 0),
+                -- compare the game's own stats on equal footing (learned efficiency of the old kind doesn't carry over)
+                gain = C.M.unitScore(evolved, true) - C.M.unitScore(base.u, true) - (partner and C.M.unitScore(partner.u, true) or 0) * 0.5,
+            })
+            -- level-1 base stats miss late-level area attacks/curses; the battle sim's pick always counts as a gain
+            local e = out[#out]
+            if target == CFG.evoFocus then e.gain = math.max(e.gain, 1) + 1e5; e.focus = true end
+            -- S-tier targets: their strength is mostly in abilities the stat score can't see
+            if CFG.sTierEvolve and not e.focus and not owned[target] and C.M.tierMult(target, "Story") >= 1.25 then
+                e.gain = math.max(e.gain, 1) + 5e4; e.sTier = true
+            end
+            end
+        end
+    end
+    table.sort(out, function(a, b) return a.progress > b.progress end)
+    return out
+end
+function C.EVO.refreshNeeds(prof)
+    local needs, sNeeds, needFor = {}, {}, {}
+    for _, e in ipairs(C.EVO.list(prof)) do
+        if e.gain > 0 and not e.itemsReady then
+            for k, n in pairs(e.flat or e.def.items or {}) do
+                if (tonumber(prof.items and prof.items[k]) or 0) < n then
+                    needs[k] = true
+                    if e.sTier and k ~= "page" then sNeeds[k] = true end
+                    if not needFor[k] or e.focus or e.sTier then needFor[k] = e.target end
+                end
+            end
+        end
+    end
+    B.sTierNeeds, B.evoNeedFor = sNeeds, needFor
+    -- Lich Ooze only drops in the Lich Lair, which takes a Lich Portal (Infinite drops those)
+    if needs.lichooze then needs.lichportal = true end
+    B.evoNeeds = needs
+    return needs
+end
+-- an evolution that has every item except pages (pages only come from challenges)
+function C.EVO.pageBlocked(prof)
+    for _, e in ipairs(C.EVO.list(prof)) do
+        local pages = e.flat and e.flat.page
+        if e.gain > 0 and pages and (tonumber(prof.items and prof.items.page) or 0) < pages then
+            local rest = true
+            for k, n in pairs(e.flat) do
+                if k ~= "page" and (tonumber(prof.items and prof.items[k]) or 0) < n then rest = false end
+            end
+            if rest then return e end
+        end
+    end
+    return nil
+end
+-- gems held back for the closest evolution (≥60% of its items in hand)
+function C.EVO.gemReserve(prof)
+    for _, e in ipairs(C.EVO.list(prof)) do
+        if e.gain > 0 and e.progress >= 0.6 and (e.def.gems or 0) > 0 then return e.def.gems, e end
+    end
+    return 0
+end
+-- total enemy HP across a stage (the game's own wave lists + stageWaveHp)
+function C.M.stageDifficulty(stage, mods)
+    local waves = C.Catalog.stageWaves(stage)
+    local total = 0
+    for w, groups in ipairs(waves) do
+        local cnt = 0
+        for _, g in ipairs(groups) do cnt = cnt + (tonumber(g[2]) or 1) * ((g[1] or ""):find("King") and 6 or 1) end
+        total = total + cnt * C.Catalog.stageWaveHp(stage, w)
+    end
+    if mods then
+        total = total * (mods.hp or 1) * (mods.count or 1) * (mods.speed or 1) ^ 0.7 / (mods.dmg or 1)
+        total = total / (mods.lives or 1) ^ 0.25
+    end
+    return total, #waves
+end
+
+-- ============================================================
+--  MODE PICKER (shared: lobby launches it, match decides again/next/home)
+-- ============================================================
+C.MODE = { banned = {} } -- [modeKey] = os.time() until which the server refused it
+function C.MODE.key(m)
+    if m.tourney then return "tr" end
+    if m.portal then return "pt:" .. m.stage end
+    return m.challenge and ("ch:" .. m.stage) or (m.infinite and ("inf:" .. m.stage) or ("st:" .. m.stage))
+end
+-- weekly tournament: play while any of its fixed rewards is still missing this week, then again once the
+-- team is CFG.tourneyRegrow stronger than at the last attempt (a better run climbs the crystal board).
+-- C.tourneyInfo is the server's GetTourney answer, refreshed in the lobby.
+function C.MODE.tourneyWanted(prof)
+    local info = C.tourneyInfo or B.tourneyInfo
+    local T = C.Catalog.TOURNEY
+    if not (info and T and type(info.week) == "table") then return nil end
+    local mine = type(info.mine) == "table" and info.mine or {}
+    -- a cached answer from last week: nothing is got in the new week
+    local okN, nowWeek = pcall(C.Catalog.tourneyWeekOf, os.time())
+    if okN and tonumber(info.week.n) and tonumber(info.week.n) ~= nowWeek then mine = {}; info = { week = { n = nowWeek } } end
+    if mine.why == "tester" then return nil end
+    local got = type(mine.got) == "table" and mine.got or {}
+    local gotSet = {}
+    for k, v in pairs(got) do if type(v) == "string" then gotSet[v] = true elseif v then gotSet[k] = true end end
+    local missing = {}
+    for _, r in ipairs(T.rewards or {}) do if not gotSet[r.id] then table.insert(missing, r.id) end end
+    local week = tostring(info.week.n or "")
+    local last = B.tourney or {}
+    if last.week ~= week then last = {} end
+    -- a failed attempt this week with the same team won't do better: wait for growth
+    local power = C.MODE.teamPower(prof)
+    local grown = not last.power or power >= last.power * CFG.tourneyRegrow
+    if #missing > 0 and (not last.at or grown or os.time() - last.at > 6 * 3600) then return "rewards: " .. table.concat(missing, ",") end
+    -- the planner found a team / placement not tried yet this week that should beat the best on the board
+    local ts = B.tourneySim
+    local best = tonumber(mine.best) or 0
+    if ts and ts.week == week and best > 0 and last.plan ~= C.MODE.tourneyPlan(ts) then
+        local pred = (tonumber(ts.score) or 0) * (tonumber(ts.cal) or 1)
+        if pred > best * 1.05 then return string.format("plan ≈%.0fM > best %.0fM", pred / 1e6, best / 1e6) end
+    end
+    if (tonumber(mine.best) or 0) > 0 and last.power and grown then return "team grew x" .. string.format("%.2f", power / last.power) end
+    return nil
+end
+function C.MODE.tourneyPlan(ts) return ts and (tostring(ts.team) .. ":" .. tostring(ts.strat)) or nil end
+function C.MODE.teamPower(prof)
+    -- power is always measured in the lobby (Hub/UnitBase); the match reuses the last lobby value so
+    -- records made in either place compare like for like
+    if SF.where == "match" and B.lastPower then return B.lastPower end
+    local units, slots = prof and prof.units or {}, prof and prof.slots or {}
+    local sum = 0
+    for _, id in ipairs(slots) do if units[id] then sum = sum + C.M.unitScore(units[id], nil, true) end end
+    return sum
+end
+function C.MODE.capability(power, prof)
+    -- the hardest stage we have won, scaled by how much stronger the team is now than then
+    local best
+    for key, s in pairs(B.stages) do
+        if (s.wins or 0) > 0 and s.diff and s.power and s.power > 0 then
+            -- a flawless win (no lives lost) means a lot more headroom than a scrape
+            local margin = 1 + 1.5 * (tonumber(s.livesFrac) or 0) ^ 2
+            local c = s.diff * margin * (power / s.power) ^ 1.15
+            if not best or c > best then best = c end
+        end
+    end
+    -- stages the profile already cleared count as beaten (the team is at least as strong now)
+    for id, n in pairs(prof and prof.cleared or {}) do
+        local st = (tonumber(n) or 0) > 0 and C.Catalog.stage(tonumber(id))
+        local rec = st and B.stages["st:" .. id]
+        if st and not (rec and rec.power) then
+            local d = C.M.stageDifficulty(st)
+            if not best or d > best then best = d end
+        end
+    end
+    if not best then
+        local s1 = C.Catalog.stage(1)
+        best = s1 and C.M.stageDifficulty(s1) * 1.3 or 1
+    end
+    return best
+end
+-- normal-story selector for the manual endless replay mode.  It deliberately derives the list from
+-- Catalog at runtime instead of hardcoding stage ids, so new worlds / reordered acts keep working.
+function C.MODE.normalWorlds()
+    local out = {}
+    for wi, w in ipairs(C.Catalog.WORLDS or {}) do
+        if not w.portalOnly and not w.raid then
+            local stages = {}
+            for _, st in ipairs(C.Catalog.STAGES or {}) do
+                local sw = C.Catalog.worldOf(st.id)
+                local same = sw and ((sw.id ~= nil and w.id ~= nil and sw.id == w.id) or sw == w)
+                if same and not st.infinite and not st.raid then
+                    table.insert(stages, st)
+                end
+            end
+            table.sort(stages, function(a, b) return (tonumber(a.id) or 0) < (tonumber(b.id) or 0) end)
+            if #stages > 0 then
+                local name = tostring(w.name or w.displayName or w.title or ("World " .. tostring(w.id or wi)))
+                table.insert(out, { world = w, name = name, stages = stages, sourceIndex = wi })
+            end
+        end
+    end
+    return out
+end
+
+function C.MODE.selectedNormal(prof)
+    local worlds = C.MODE.normalWorlds()
+    if #worlds == 0 then return nil, "no normal worlds found" end
+
+    local wi = math.clamp(math.floor(tonumber(CFG.normalWorld) or 1), 1, #worlds)
+    local W = worlds[wi]
+    local ai = math.clamp(math.floor(tonumber(CFG.normalAct) or 1), 1, #W.stages)
+    local st = W.stages[ai]
+
+    -- Keep the stored values sane when the game adds/removes maps.
+    CFG.normalWorld, CFG.normalAct = wi, ai
+
+    if not st then return nil, "selected act does not exist" end
+    if prof and C.Catalog.unlocked and not C.Catalog.unlocked(prof, st.id) then
+        return nil, string.format("%s · Act %d is locked", W.name, ai)
+    end
+
+    local cleared = prof and prof.cleared or {}
+    local first = (tonumber(cleared and cleared[tostring(st.id)]) or 0) <= 0
+    return {
+        stage = st.id,
+        first = first,
+        kind = "manual",
+        manual = true,
+        manualWorld = wi,
+        manualAct = ai,
+    }, string.format("%s · Act %d · %s", W.name, ai, tostring(st.name or ("Stage " .. tostring(st.id))))
+end
+
+function C.MODE.candidates(prof, now)
+    local list = {}
+    local cleared = prof.cleared or {}
+    for _, stage in ipairs(C.Catalog.STAGES) do
+        local world = C.Catalog.worldOf(stage.id)
+        local ready = world and C.Catalog.worldReady(world) and not world.portalOnly and not world.raid
+        if ready and C.Catalog.unlocked(prof, stage.id) and not stage.infinite and not stage.raid then
+            local first = (tonumber(cleared[tostring(stage.id)]) or 0) <= 0
+            if (first and CFG.story) or (not first and CFG.farm) then
+                table.insert(list, { stage = stage.id, first = first, kind = first and "story" or "farm" })
+            end
+        end
+    end
+    if CFG.challenges and C.Catalog.challengesAt then
+        local ok, chs = pcall(C.Catalog.challengesAt, now)
+        for challengeSlot, ch in ipairs(ok and chs or {}) do
+            local okW, won = pcall(C.Catalog.challengeWon, prof, ch.id)
+            won = okW and won == true
+            local repeatAllowed = (tonumber(CFG.challengeMode) or 1) >= 2
+            if C.Catalog.unlocked(prof, ch.stage) and (not won or repeatAllowed) then
+                table.insert(list, {
+                    stage = ch.stage, challenge = ch.id, mods = C.Catalog.challengeMods(ch),
+                    kind = "challenge", ch = ch, challengeFirst = not won, challengeSlot = challengeSlot,
+                })
+            end
+        end
+    end
+    -- Lich Lair: a Lich Portal opens it (Lich Ooze + a shot at the secret Lich Lord)
+    if CFG.lich and C.Catalog.PORTAL and (tonumber(prof.items and prof.items[C.Catalog.PORTAL.item]) or 0) > 0 then
+        local okP, st = pcall(C.Catalog.portalStage, prof)
+        if okP and st then table.insert(list, { stage = st.id, portal = true, kind = "portal", first = false }) end
+    end
+    -- weekly tournament
+    if CFG.tourney and C.MODE.tourneyWanted then
+        local why = C.MODE.tourneyWanted(prof)
+        if why then table.insert(list, { stage = 0, tourney = true, kind = "tourney", why = why }) end
+    end
+    -- Infinite drops Lich Portals: worth it while an evolution waits on Lich Ooze
+    local wantPortal = CFG.lich and C.Catalog.PORTAL and (tonumber(prof.items and prof.items[C.Catalog.PORTAL.item]) or 0) == 0
+        and ((B.evoNeeds or {}).lichportal or (CFG.lichHunt and not C.M.ownsAny({ "Lich", "JakeTheLich" })))
+    if CFG.infinite or wantPortal then
+        for _, w in ipairs(C.Catalog.WORLDS) do
+            local okI, open = pcall(C.Catalog.infiniteOpen, prof, w.id)
+            local inf = okI and open and C.Catalog.infiniteStage(w.id)
+            if inf then table.insert(list, { stage = inf.id, infinite = true, world = w.id, kind = "infinite" }) end
+        end
+    end
+    -- Halloween event: raid whenever there's a key; Infinite in the key world (100% key every 10 waves) when out
+    local RAID = C.Catalog.RAID
+    local evOn = RAID and C.Catalog.eventOn and C.Catalog.eventOn()
+    if evOn then
+        local keys = tonumber(prof.items and prof.items[RAID.key]) or 0
+        -- gate: the battle sim (run in a match with the team we'd bring) must win with headroom
+        local sim = B.raidSim
+        local simOk = sim and (tonumber(sim.margin) or 0) >= CFG.raidMinMargin and sim.team == C.MODE.raidTeamKey(prof)
+        if CFG.raids and keys > 0 and C.Catalog.stage(RAID.stage) and simOk then
+            table.insert(list, { stage = RAID.stage, raid = true, kind = "raid" })
+        end
+        C.MODE.raidGate = (keys > 0 and not simOk) and C.MODE.raidPlain(sim) or nil
+        if CFG.infKeys and keys < CFG.keyTarget then
+            local okI, open = pcall(C.Catalog.infiniteOpen, prof, RAID.keyWorld)
+            local inf = okI and open and C.Catalog.infiniteStage(RAID.keyWorld)
+            if inf then
+                table.insert(list, { stage = inf.id, infinite = true, world = RAID.keyWorld, kind = "keys" })
+            end
+        end
+    end
+    return list
+end
+-- priority tiers: new story maps > unbeaten challenges (they expire after 30 min) > raid / Lich Lair /
+-- tournament rewards (keys and portals keep until the event ends) > Infinite for keys > farming
+function C.MODE.tier(m)
+    if m.first then return 5 end
+    if m.challenge then
+        -- Focus mode means what it says: if the Dungeon Train has an active playable car, stay on Challenges.
+        -- First-win cars still sort above repeats so every refreshed bonus is claimed before the endless loop.
+        if (tonumber(CFG.challengeMode) or 1) >= 3 then return m.challengeFirst and 7 or 6 end
+        if m.challengeFirst then return 4 end
+        return 2
+    end
+    -- the raid's big prize is its secret hero (Demon Lord); once owned, raids compete on value like farming
+    local raidSecretOwned = C.M.ownsAny({ "Hunson", "HunsonDemon" })
+    -- ... or while its candy still buys The Dark Cloud
+    if m.raid then return (raidSecretOwned and not C.M.candyGoal()) and 1 or 3 end
+    if m.kind == "keys" and raidSecretOwned then return 1 end
+    -- a held Lich Portal and the tournament's missing rewards rank with challenges
+    if m.portal then return 3 end
+    -- an untried planner pick that should beat the board best: one 11-minute run, as urgent as a challenge
+    -- (it only comes back once a new plan beats the new best by 5%)
+    if m.tourney then return (m.why or ""):find("^plan") and 4 or ((m.why or ""):find("^rewards") and 3 or 2) end
+    -- keys only jump the queue while raids are viable; otherwise they compete on value with farming
+    if m.kind == "keys" then
+        local s = B.raidSim
+        return (s and (tonumber(s.margin) or 0) >= CFG.raidMinMargin) and 2 or 1
+    end
+    return 1
+end
+function C.MODE.score(m, prof, power, cap, totalRuns)
+    if m.tourney then
+        -- 10-minute run: fixed rewards still missing + the crystal board (counted at the bottom paid place)
+        local T = C.Catalog.TOURNEY
+        local R = 0
+        for _, r in ipairs(T.rewards or {}) do
+            if (m.why or ""):find(r.id, 1, true) then R = R + (r.gems or 0) * C.M.gemValue(prof) + C.M.itemsValue(r.items) end
+        end
+        local lowest = T.places and T.places[#T.places]
+        R = R + (lowest and lowest.crystal or 0) * (C.ITEM_VALUE.crystal or 35) * 0.5
+        local sec = (T.length or 600) + (T.build or 30) + 40
+        m.p, m.R, m.sec, m.value = 1, R, sec, R / (sec / 60)
+        return m.value
+    end
+    local stage = C.Catalog.stage(m.stage)
+    if not stage then return -1 end
+    local key = C.MODE.key(m)
+    local rec = B.stages[key] or {}
+    local diff, nWaves = C.M.stageDifficulty(stage, m.mods)
+    m.diff = diff
+    -- prior win chance from difficulty vs what this team has beaten, then the measured record
+    local p0 = 1 / (1 + (diff / math.max(cap, 1)) ^ 2)
+    local runs, wins = rec.runs or 0, rec.wins or 0
+    -- losses taken with a weaker team say little about this team: weight them by (then/now power)²
+    local losses = runs - wins
+    if rec.power and power > 0 and rec.power < power then losses = losses * (rec.power / power) ^ 2 end
+    runs = wins + losses
+    local p = (wins + 2 * p0) / (runs + 2)
+    if m.infinite then p = 1 end
+    -- the raid's prior comes from the battle simulator (current team wins with ~3x HP margin)
+    if m.raid then p = (wins + 2 * 0.9) / (runs + 2) end
+    -- reward in gem-equivalents (gems themselves × C.M.gemValue: less while there's nothing to buy)
+    local R
+    local gv = C.M.gemValue(prof)
+    if m.challenge then
+        local chR = C.Catalog.CHALLENGE.reward or {}
+        R = (chR.gems or 0) * gv + C.M.itemsValue(chR.items)
+        if m.challengeFirst then
+            R = R + C.M.itemsValue((C.Catalog.CHALLENGE.first or {}).items)
+        end
+        -- an evolution waiting only on pages: every repeat Page is still real progress toward the evolution
+        local blocked = CFG.evolve and C.EVO.pageBlocked(prof)
+        if blocked then R = R + (CFG.goal == 1 and 1500 or 300); m.forEvo = blocked.target end
+        -- Progress bonus applies only to an unclaimed car, not every repeat clear.
+        if CFG.goal == 1 and m.challengeFirst then R = R + 800 end
+    elseif m.infinite then
+        local best = C.Catalog.infiniteBest(prof, m.world)
+        -- each world's own drop: during the event the Nightosphere drops raid keys (100%) instead of Lich Portals
+        local okD, drop = pcall(C.Catalog.infiniteDrop, m.world)
+        local okC, chance = pcall(C.Catalog.infiniteChance, m.world)
+        drop = okD and drop or C.Catalog.INFINITE.drop or "lichportal"
+        chance = okC and tonumber(chance) or C.Catalog.INFINITE.chance
+        R = math.max(10, best) / C.Catalog.INFINITE.every * chance * C.M.itemsValue({ [drop] = 1 })
+    elseif m.portal then
+        -- Lich Ooze + stage gems, plus the secret Lich Lord's drop chance while we don't own him
+        local okW, items = pcall(C.Catalog.winItems, m.stage, false)
+        R = C.Catalog.STAGE_GEMS.again * gv + C.M.itemsValue(okW and items or nil) + C.M.itemsValue(C.Catalog.PORTAL_ITEMS and C.Catalog.PORTAL_ITEMS.lich)
+        local sec = C.Catalog.SECRET_DROPS and C.Catalog.SECRET_DROPS.Lich
+        local ownsLich = false
+        for _, u in pairs(prof.units or {}) do if u.kind == "Lich" then ownsLich = true end end
+        if sec and not ownsLich then R = R + sec.chance * CFG.secretValue end
+    else
+        local gems = m.first and C.Catalog.STAGE_GEMS.first or C.Catalog.STAGE_GEMS.again
+        local okW, items = pcall(C.Catalog.winItems, m.stage, m.first)
+        R = gems * (C.Catalog.gemsMult and C.Catalog.gemsMult(prof) or 1) * gv + C.M.itemsValue(okW and items or nil)
+        -- the raid pays Halloween Candy per wave cleared (not part of its win items)
+        local RAID = C.Catalog.RAID
+        if m.raid and RAID then R = R + C.M.itemsValue({ [RAID.candy or "hwcandy"] = (RAID.perWave or 25) * (RAID.waves or 15) }) end
+        if m.first then
+            -- Progress goal: clearing the next map is the point; gems/items only decide between farm modes
+            R = R + (CFG.goal == 1 and 1500 or CFG.progressValue)
+            for _, q in ipairs(C.Catalog.QUESTS.story) do
+                if q.check == "clear" and q.stage == m.stage then R = R + (q.reward.gems or 0) + C.M.itemsValue(q.reward.items) end
+            end
+        end
+    end
+    -- expected minutes: measured, else waves × pace. The server's wave clock keeps real runs ≥ ~3 min,
+    -- so anything far below that is a bad record (script joined mid-run) and is ignored
+    local sec = rec.sec
+    if m.infinite then
+        -- Infinite runs until it loses: ~28s a wave up to the best wave reached
+        local best = C.Catalog.infiniteBest(prof, m.world)
+        if not (sec and sec > 300) then sec = math.max(10, best) * 28 + 30 end
+    elseif sec and sec < math.max(150, nWaves * 15) then sec = nil end
+    sec = sec or (nWaves * 25 + 30)
+    local expSec = p * sec + (1 - p) * sec * 0.6 + 20
+    local value = p * R / (expSec / 60)
+    -- exploration: modes with few runs get a small optimistic bonus
+    value = value * (1 + CFG.exploreBonus * math.sqrt(math.log(totalRuns + 2) / (runs + 1)))
+    m.p, m.R, m.sec, m.value = p, R, expSec, value
+    return value
+end
+function C.MODE.pick(prof)
+    prof = prof or B.prof
+    local now = os.time()
+    local power = C.MODE.teamPower(prof)
+    local cap = C.MODE.capability(power, prof)
+    local totalRuns = 0
+    for _, s in pairs(B.stages) do totalRuns = totalRuns + (s.runs or 0) end
+    local best
+    local scored = {}
+    for _, m in ipairs(C.MODE.candidates(prof, now)) do
+        local banned = C.MODE.banned[C.MODE.key(m)]
+        if not (banned and now < banned) then
+            C.MODE.score(m, prof, power, cap, totalRuns)
+            m.tier = C.MODE.tier(m)
+            table.insert(scored, m)
+            -- higher tier wins; within a tier, the best value per minute (a raid we keep losing drops to farming)
+            if m.raid and (m.p or 1) < 0.35 then m.tier = 1 end
+            if m.value > 0 and (not best or m.tier > best.tier or (m.tier == best.tier and m.value > best.value)) then best = m end
+        end
+    end
+    table.sort(scored, function(a, b) if a.tier ~= b.tier then return a.tier > b.tier end return a.value > b.value end)
+    local top = {}
+    for i = 1, math.min(3, #scored) do top[i] = C.MODE.describe(scored[i]) end
+    C.MODE.lastTop = table.concat(top, " | ")
+    C.MODE.lastScored = scored -- full ranking (GUI)
+
+    -- Focus Challenges: clear every unclaimed refreshed car first, then rotate every active car forever.
+    -- challengesAt() is called on every pick, so a Dungeon Train refresh automatically swaps in the new ids.
+    if CFG.challenges and (tonumber(CFG.challengeMode) or 1) >= 3 then
+        local active, firsts = {}, {}
+        for _, m in ipairs(scored) do
+            if m.challenge and (m.value or 0) > 0 then
+                table.insert(active, m)
+                if m.challengeFirst then table.insert(firsts, m) end
+            end
+        end
+        local pool = #firsts > 0 and firsts or active
+        if #pool > 0 then
+            table.sort(pool, function(a, b)
+                local sa, sb = tonumber(a.challengeSlot) or 999, tonumber(b.challengeSlot) or 999
+                if sa ~= sb then return sa < sb end
+                return tostring(a.challenge) < tostring(b.challenge)
+            end)
+
+            local last = tostring(B.challengeLast or "")
+            local chosen = pool[1]
+            -- If the previous car is still in this pool, take the next one (wrap at the end).
+            for i, m in ipairs(pool) do
+                if tostring(m.challenge) == last then
+                    chosen = pool[(i % #pool) + 1]
+                    break
+                end
+            end
+
+            -- If first-win bonuses remain but the previous car isn't one of them, the first unclaimed car wins.
+            best = chosen
+            C.MODE.challengeLoop = string.format("car %s/%s · %s",
+                tostring(best.challengeSlot or "?"), tostring(#active),
+                best.challengeFirst and "first-win bonus" or "repeat loop")
+        else
+            C.MODE.challengeLoop = "waiting for playable Dungeon Train cars"
+        end
+    else
+        C.MODE.challengeLoop = nil
+    end
+
+    -- Manual normal replay is the strongest user intent: when enabled, ignore the route ranking and
+    -- play exactly the selected World + Act.  Story/Farm/Challenge toggles do not change this selection.
+    if CFG.normalLoop then
+        local manual, note = C.MODE.selectedNormal(prof)
+        C.MODE.normalLoopNote = note
+        if manual then
+            C.MODE.score(manual, prof, power, cap, totalRuns)
+            manual.tier = 99
+            best = manual
+        else
+            -- Do not silently farm something else when the user explicitly selected a locked/missing act.
+            best = nil
+        end
+    else
+        C.MODE.normalLoopNote = nil
+    end
+
+    if best then best.power = power end
+    return best
+end
+-- the raid gate in plain words. margin = how much tougher the raid's enemies could be and we'd still win
+-- (1.00 = only just, 1.15 = with 15% to spare)
+function C.MODE.raidPlain(sim)
+    local need = math.floor((CFG.raidMinMargin - 1) * 100 + 0.5)
+    if not (sim and tonumber(sim.margin)) then return "Raid on hold: the battle simulator hasn't tested this team yet" end
+    local m = tonumber(sim.margin)
+    if m < 1 then
+        return string.format("Raid on hold: the battle simulator says this team would lose (about %d%% too weak)", math.floor((1 - m) * 100 + 0.5))
+    end
+    local spare = math.floor((m - 1) * 100 + 0.5)
+    if m < CFG.raidMinMargin then
+        return string.format("Raid on hold: this team would only just win (%d%% to spare) — it waits until we'd still win against %d%% tougher enemies", spare, need)
+    end
+    return string.format("Raid ready: this team wins with %d%% to spare", spare)
+end
+-- the "why" of a mode in plain words, for the GUI: what this run is for
+function C.MODE.purpose(m)
+    if not m then return "" end
+    local p = B.prof or {}
+    if m.manual then
+        local _, label = C.MODE.selectedNormal(p)
+        return "Selected Stage Loop: " .. tostring(label or ("stage " .. tostring(m.stage))) .. " · replay forever"
+    end
+    if m.tourney then return "Weekly tournament: 10-minute survival for gems, crystals and a spot on the board" .. (m.why and (" (" .. tostring(m.why) .. ")") or "") end
+    if m.raid then
+        local goal = C.M.ownsAny({ "Hunson", "HunsonDemon" }) and C.M.candyGoal()
+        if goal then return "Halloween raid: Halloween Candy for " .. goal end
+        return "Halloween raid: Halloween candy, raid drops and a 3% shot at the Demon Lord"
+    end
+    if m.portal then
+        local hunt = CFG.lichHunt and not C.M.ownsAny({ "Lich", "JakeTheLich" })
+        return "Lich Lair: 2 Lich Ooze" .. (hunt and " + a 5% roll for Lich Lord (→ Lich Dog, the strongest hero)" or "")
+    end
+    if m.infinite then
+        local okD, drop = pcall(C.Catalog.infiniteDrop, m.world)
+        drop = okD and drop or "lichportal"
+        if drop == "raidkey" then return "Infinite in the Nightosphere: a Raid Key every 10 waves" end
+        local hunt = CFG.lichHunt and not C.M.ownsAny({ "Lich", "JakeTheLich" })
+        return "Infinite: farming Lich Portals (30% per 10 waves)" .. (hunt and " for the Lich Lord hunt" or "")
+    end
+    if m.challenge then
+        if m.challengeFirst then
+            return "Dungeon Train first win: claim the extra Trait Crystals + Juice, plus the regular Gems/Page reward"
+        end
+        return "Dungeon Train repeat: keep farming the regular Gems/Page reward until the cars refresh"
+    end
+    if m.first then return "New map: first clear unlocks the next stage" end
+    -- farm: name the items it drops that an evolution still needs
+    local okW, items = pcall(C.Catalog.winItems, m.stage, false)
+    local want, forWho = {}, nil
+    for k in pairs(okW and items or {}) do
+        if (B.evoNeeds or {})[k] then
+            local it = C.Catalog.ITEMS and C.Catalog.ITEMS[k]
+            table.insert(want, it and it.name or k)
+            forWho = forWho or (B.evoNeedFor or {})[k]
+        end
+    end
+    forWho = forWho or CFG.evoFocus
+    if #want > 0 then return "Farming " .. table.concat(want, ", ") .. " for " .. tostring((C.Catalog.UNITS[forWho or ""] or {}).name or forWho) end
+    return "Farming gems and items (best value per minute)"
+end
+function C.MODE.describe(m)
+    if not m then return "none" end
+    local st = C.Catalog.stage(m.stage)
+    if m.tourney then return string.format("Weekly Tournament [%s] · %.0f gem-eq/min", tostring(m.why), m.value or 0) end
+    local name = st and st.name or ("stage " .. m.stage)
+    local tag = m.manual and "SELECTED STAGE · endless"
+        or m.portal and "LICH PORTAL" or m.raid and "RAID" or (m.kind == "keys" and "infinite · raid keys")
+        or (m.challenge and (m.challengeFirst and "challenge · FIRST WIN" or "challenge · repeat")
+        or (m.infinite and "infinite" or (m.first and "first clear" or "farm")))
+    return string.format("%s [%s] win %.0f%% · %.0f gem-eq/min", name, tag, (m.p or 0) * 100, m.value or 0)
+end
+
+-- ============================================================
+--  LOBBY BRAIN
+-- ============================================================
+local HUB = { prof = nil, lastProfileAt = 0, busyUntil = 0 }
+function HUB.refresh(force)
+    if not force and HUB.prof and U.now() - HUB.lastProfileAt < 20 then return HUB.prof end
+    local res = SF.request("GetProfile", C.R("GetProfile"))
+    if type(res) == "table" and type(res.profile) == "table" then HUB.setProfile(res.profile) end
+    return HUB.prof
+end
+function HUB.setProfile(p)
+    HUB.prof = p
+    HUB.lastProfileAt = U.now()
+    -- cache what the match side needs to make mode decisions
+    B.prof = { cleared = p.cleared, chWins = p.chWins, infinite = p.infinite, units = p.units, slots = p.slots, passes = p.passes, gems = p.gems, items = p.items }
+    B.lastPower = C.MODE.teamPower(p)
+    C.EVO.refreshNeeds(p)
+    if not B.powerHub then
+        -- one-time migration: older records were stamped with match-side power
+        for _, s in pairs(B.stages) do if s.power then s.power = B.lastPower end end
+        B.powerHub = true
+    end
+    SF.saveSoon()
+end
+function HUB.apply(res)
+    if type(res) == "table" and type(res.profile) == "table" then HUB.setProfile(res.profile) end
+end
+function HUB.items(name) return HUB.prof and HUB.prof.items and tonumber(HUB.prof.items[name]) or 0 end
+
+-- rewards: daily login, quests, player-level milestones, battle pass
+function HUB.rewards()
+    if not CFG.rewards then return SF.status("Rewards", "off") end
+    local p = HUB.refresh()
+    if not p then return end
+    local got = {}
+    local function note(what, res, err)
+        -- log each distinct refusal once, so a stuck reward is visible instead of silently skipped
+        local why = tostring(type(res) == "table" and res.reason or err or "?")
+        HUB.refusals = HUB.refusals or {}
+        if HUB.refusals[what] ~= why then
+            HUB.refusals[what] = why
+            SF.log(1, "REWARD", what .. " refused: " .. why)
+        end
+    end
+    local r, rerr = SF.request("ClaimDaily", C.R("ClaimDaily"))
+    if type(r) == "table" and r.ok then table.insert(got, "daily login"); HUB.apply(r) else note("daily login", r, rerr) end
+    -- codes: each configured code is tried once per account (codes that already worked or expired are remembered)
+    B.codes = type(B.codes) == "table" and B.codes or {}
+    for code in tostring(CFG.codes or ""):gmatch("[%w_]+") do
+        local key = tostring(LP.UserId) .. ":" .. code:upper()
+        if not B.codes[key] then
+            local res, err = SF.request("RedeemCode:" .. code, C.R("RedeemCode"), code)
+            -- remember only final answers (worked / used / expired / unknown code); rate limits are retried
+            local reason = type(res) == "table" and tostring(res.reason or "") or ""
+            local final = type(res) == "table" and (res.ok or reason:find("already") or reason:find("run out") or reason:find("ran out")
+                or reason:find("not a code") or reason:find("expired") or reason:find("once"))
+            if final then B.codes[key] = res.ok and "ok" or reason end
+            if type(res) == "table" and res.ok then table.insert(got, "code " .. code); HUB.apply(res)
+            else SF.log(1, "REWARD", "code " .. code .. ": " .. (reason ~= "" and reason or tostring(err)) .. (final and "" or " (will retry)")) end
+            SF.saveSoon()
+            SF.req.back["RedeemCode:" .. code] = nil
+            task.wait(final and 1.2 or 2.5) -- the server allows one code at a time
+        end
+    end
+    local day = C.Catalog.dayOf(os.time())
+    for _, q in ipairs(C.Catalog.QUESTS.daily) do
+        local prog, goal, claimed = C.Catalog.dailyProgress(HUB.prof, q, day)
+        if prog >= goal and not claimed then
+            local res, err = SF.request("ClaimQuest:" .. q.id, C.R("ClaimQuest"), q.id)
+            if type(res) == "table" and res.ok then table.insert(got, q.id); HUB.apply(res) else note(q.id, res, err) end
+        end
+    end
+    -- story: the current step first; if it's stuck (e.g. "redeem a code"), still try later finished steps
+    local story = C.Catalog.currentStory(HUB.prof)
+    local done = type(HUB.prof.quests) == "table" and HUB.prof.quests.story or {}
+    for _, q in ipairs(C.Catalog.QUESTS.story) do
+        if not done[q.id] then
+            local prog, goal = C.Catalog.storyProgress(HUB.prof, q)
+            if prog >= goal then
+                local res, err = SF.request("ClaimQuest:" .. q.id, C.R("ClaimQuest"), q.id)
+                if type(res) == "table" and res.ok then table.insert(got, q.id); HUB.apply(res)
+                    done = type(HUB.prof.quests) == "table" and HUB.prof.quests.story or done
+                else note(q.id, res, err); SF.req.back["ClaimQuest:" .. q.id] = U.now() + 3 end
+                task.wait(0.8) -- "Slow down a little!": the server rate-limits claims
+            end
+        end
+    end
+    story = C.Catalog.currentStory(HUB.prof)
+    local okL, LR = pcall(function() return require(C.root:FindFirstChild("LevelRewards")) end)
+    if okL and LR then
+        for _ = 1, 10 do
+            local n, first = LR.ready(HUB.prof)
+            if not (n > 0 and first) then break end
+            local res, err = SF.request("ClaimLevelReward:" .. first, C.R("ClaimLevelReward"), first)
+            if type(res) == "table" and res.ok then table.insert(got, "level " .. first); HUB.apply(res) else note("level " .. first, res, err); break end
+        end
+    end
+    local pass = RS:FindFirstChild("PassRemotes")
+    if pass and pass:FindFirstChild("ClaimAll") then
+        local res, err = SF.request("PassClaimAll", pass.ClaimAll)
+        if type(res) == "table" and res.ok then
+            HUB.apply(res)
+            local n = type(res.claimed) == "table" and #res.claimed or (type(res.count) == "number" and res.count or 0)
+            if n > 0 then table.insert(got, n .. " pass tiers") end
+        else note("battle pass", res, err) end
+        SF.backoff("PassClaimAll", 120)
+    end
+    if #got > 0 then SF.log(1, "REWARD", "claimed " .. table.concat(got, ", ")) end
+    SF.status("Rewards", #got > 0 and ("claimed " .. table.concat(got, ", ")) or ("nothing ready · story: " .. (story and story.text or "done")))
+end
+
+-- team: the best set of 6 distinct kinds. Each hero's score × its pair passive (Catalog.PASSIVES: e.g.
+-- Rainicorn +20% damage with Jake on the team) — every 6-of-the-top-10 combination is scored.
+-- `mult(kind)` scales each hero first (the tournament's element buff/debuff)
+-- community tier-list bonus for a kind: list = "Story" or "Tourney" (CFG.tier<list>S / A)
+function C.M.tierMult(kind, list)
+    for k in tostring(CFG["tier" .. list .. "S"] or ""):gmatch("[%w_]+") do if k == kind then return 1.25 end end
+    for k in tostring(CFG["tier" .. list .. "A"] or ""):gmatch("[%w_]+") do if k == kind then return 1.10 end end
+    return 1
+end
+function HUB.bestTeam(mult)
+    mult = mult or function(kind) return C.M.tierMult(kind, "Story") end
+    local p = HUB.prof
+    local byKind = {}
+    for id, u in pairs(p.units or {}) do
+        local s = C.M.unitScore(u) * (mult and mult(u.kind) or 1)
+        if not byKind[u.kind] or s > byKind[u.kind].s then byKind[u.kind] = { id = id, s = s, u = u } end
+    end
+    local list = {}
+    for _, v in pairs(byKind) do table.insert(list, v) end
+    table.sort(list, function(a, b) return a.s > b.s end)
+    local n = C.Catalog.SLOTS
+    local pool = {}
+    for i = 1, math.min(#list, 10) do pool[i] = list[i] end
+    local chosen = {}
+    for i = 1, math.min(n, #pool) do chosen[i] = pool[i] end
+    if CFG.passives and #pool > n then
+        local function value(set)
+            local kinds = {}
+            for _, v in ipairs(set) do kinds[v.u.kind] = true end
+            local sum = 0
+            for _, v in ipairs(set) do sum = sum + v.s * C.M.passiveMult(v.u.kind, kinds) end
+            return sum
+        end
+        local best, bestV = chosen, value(chosen)
+        local idx = {}
+        local function rec(start, depth)
+            if depth > n then
+                local set = {}
+                for i = 1, n do set[i] = pool[idx[i]] end
+                local v = value(set)
+                if v > bestV then best, bestV = set, v end
+                return
+            end
+            for i = start, #pool - (n - depth) do idx[depth] = i; rec(i + 1, depth + 1) end
+        end
+        rec(1, 1)
+        chosen = best
+    end
+    table.sort(chosen, function(a, b) return a.s > b.s end)
+    local slots = {}
+    for i = 1, n do slots[i] = chosen[i] and chosen[i].id or "" end
+    return slots, chosen
+end
+function HUB.team()
+    if not CFG.team then return SF.status("Team", "off") end
+    local p = HUB.refresh()
+    if not p then return end
+    local slots, list = HUB.bestTeam()
+    local same = true
+    local cur = {}
+    for i = 1, C.Catalog.SLOTS do
+        if (p.slots[i] or "") ~= slots[i] then same = false end
+        cur[slots[i]] = true
+    end
+    local names = {}
+    for i = 1, math.min(6, #list) do names[i] = list[i].u.kind .. " " .. U.fmt(list[i].s) end
+    if same then return SF.status("Team", "best team set · " .. table.concat(names, ", ")) end
+    -- keep order-insensitive: only send if the set differs
+    local setSame = true
+    for i = 1, C.Catalog.SLOTS do if (p.slots[i] or "") ~= "" and not cur[p.slots[i]] then setSame = false end end
+    for id in pairs(cur) do if id ~= "" and not table.find(p.slots, id) then setSame = false end end
+    if setSame then return SF.status("Team", "best team set · " .. table.concat(names, ", ")) end
+    local res, err = SF.request("SetSlots", C.R("SetSlots"), slots)
+    if type(res) == "table" and res.ok then
+        HUB.apply(res)
+        SF.log(1, "TEAM", "equipped " .. table.concat(names, ", "))
+        SF.status("Team", "equipped " .. table.concat(names, ", "))
+    else
+        SF.status("Team", "SetSlots refused: " .. tostring(err))
+    end
+end
+
+-- storage cleanup: a full backpack blocks every summon. Spare copies that can't help are deleted, weakest
+-- first. Never touched: team heroes, locked heroes, the best copy of each kind + CFG.keepCopies spares
+-- (base copies for future evolutions and partners), anything Mythic or Secret, leveled or fed copies,
+-- and copies with a Legendary+ trait
+function HUB.cleanList(p)
+    p = p or HUB.prof
+    local team = {}
+    for _, id in ipairs(p.slots or {}) do if id ~= "" then team[id] = true end end
+    local byKind = {}
+    for id, u in pairs(p.units or {}) do
+        byKind[u.kind] = byKind[u.kind] or {}
+        table.insert(byKind[u.kind], { id = id, u = u, s = C.M.unitScore(u) })
+    end
+    local out = {}
+    for kind, list in pairs(byKind) do
+        local info = C.Catalog.UNITS[kind]
+        local r = info and C.Catalog.RARITIES[info.rarity]
+        if r and r.order <= CFG.cleanMaxRarity then
+            table.sort(list, function(a, b) return a.s > b.s end)
+            local kept = 0
+            for _, c in ipairs(list) do
+                local u = c.u
+                -- traitRarity gives the rarity table ({order, name}) — or a name on older builds
+                local tr = u.trait and C.Catalog.traitRarity and C.Catalog.traitRarity(u.trait)
+                local trOrder = type(tr) == "table" and (tonumber(tr.order) or 0)
+                    or (tr and C.Catalog.TRAIT_RARITIES and C.Catalog.TRAIT_RARITIES[tr] and C.Catalog.TRAIT_RARITIES[tr].order) or 0
+                local precious = team[c.id] or u.locked or u.lock or (tonumber(u.level) or 1) > 1 or (tonumber(u.xp) or 0) > 0 or trOrder >= 4
+                if precious then
+                    kept = kept + 1
+                elseif kept < 1 + CFG.keepCopies then
+                    kept = kept + 1
+                else
+                    table.insert(out, c)
+                end
+            end
+        end
+    end
+    table.sort(out, function(a, b) return a.s < b.s end)
+    return out
+end
+function HUB.cleanup(dry)
+    if not CFG.cleanup then return SF.status("Cleanup", "off") end
+    local p = HUB.refresh()
+    if not p then return end
+    local count, max = C.Catalog.unitCount(p), C.Catalog.inventoryMax(p)
+    local free = max - count
+    local list = HUB.cleanList(p)
+    if free >= CFG.cleanFree and not dry then return SF.status("Cleanup", string.format("backpack %d/%d · %d spare copies deletable", count, max, #list)) end
+    local want = math.min(#list, math.max(0, CFG.cleanTo - free))
+    if want == 0 then return SF.status("Cleanup", string.format("backpack %d/%d · nothing safe to delete", count, max)) end
+    local ids, names = {}, {}
+    for i = 1, want do table.insert(ids, list[i].id); names[list[i].u.kind] = (names[list[i].u.kind] or 0) + 1 end
+    local txt = {}
+    for k, n in pairs(names) do table.insert(txt, k .. "×" .. n) end
+    table.sort(txt)
+    if dry then return ids, table.concat(txt, ", ") end
+    local done = 0
+    for i = 1, #ids, 10 do
+        local batch = {}
+        for j = i, math.min(i + 9, #ids) do table.insert(batch, ids[j]) end
+        local res, err = SF.request("DeleteUnits", C.R("DeleteUnits"), batch)
+        if type(res) == "table" and res.ok then
+            if type(res.profile) == "table" then HUB.setProfile(res.profile) else HUB.refresh(true) end
+            done = done + #batch
+        else
+            SF.log(1, "CLEANUP", "DeleteUnits refused: " .. tostring(err))
+            SF.backoff("DeleteUnits", 300)
+            break
+        end
+        task.wait(0.6)
+    end
+    local msg = string.format("deleted %d spare copies (%s) · backpack %d/%d", done, table.concat(txt, ", "), C.Catalog.unitCount(HUB.prof), max)
+    SF.log(1, "CLEANUP", msg)
+    SF.status("Cleanup", msg)
+end
+
+-- feed: candies + spare copies into the team unit with the best damage gain per XP
+function HUB.fodder()
+    local p = HUB.prof
+    local team = {}
+    for _, id in ipairs(p.slots or {}) do if id ~= "" then team[id] = true end end
+    local byKind = {}
+    for id, u in pairs(p.units or {}) do
+        if not team[id] and not u.locked and not u.lock then
+            local info = C.Catalog.UNITS[u.kind]
+            local r = info and C.Catalog.RARITIES[info.rarity]
+            if r and r.order <= CFG.fodderMaxRarity and not C.Catalog.isEvo(u.kind) then
+                byKind[u.kind] = byKind[u.kind] or {}
+                table.insert(byKind[u.kind], { id = id, u = u, s = C.M.unitScore(u) })
+            end
+        end
+    end
+    local out = {}
+    for kind, list in pairs(byKind) do
+        table.sort(list, function(a, b) return a.s > b.s end)
+        for i = CFG.keepCopies + 1, #list do table.insert(out, list[i]) end
+    end
+    return out
+end
+function HUB.feed()
+    if not CFG.feed then return SF.status("Feed", "off") end
+    local p = HUB.refresh()
+    if not p then return end
+    local L = C.Catalog.LEVEL
+    local fodder = HUB.fodder()
+    local candy, big = HUB.items("candy"), HUB.items("bigcandy")
+    if #fodder == 0 and candy + big == 0 then return SF.status("Feed", "no candy or spare units") end
+    -- pick target: best marginal damage per XP among team units below max level
+    local best, bestV
+    for _, id in ipairs(p.slots or {}) do
+        local u = p.units[id]
+        if u and (u.level or 1) < L.max then
+            local lv = u.level or 1
+            local v = C.M.unitScore(u) * L.damage / (1 + L.damage * (lv - 1)) / math.max(1, C.Catalog.xpToNext(lv))
+            for _, f in ipairs(fodder) do if f.u.kind == u.kind then v = v * 1.25 break end end
+            if not bestV or v > bestV then best, bestV = id, v end
+        end
+    end
+    -- prospects: a hero outside the team whose level-50 score beats the weakest team member. Team picks
+    -- use current levels, so without this a new Mythic at LV1 would never get the XP to earn its slot.
+    local weakest, teamKinds = math.huge, {}
+    for _, id in ipairs(p.slots or {}) do
+        local u = p.units[id]
+        if u then weakest = math.min(weakest, C.M.unitScore(u)); teamKinds[u.kind] = true end
+    end
+    local prospect, prospectV
+    local bestOfKind = {}
+    -- a kind that already has a max-level copy is in the team pick on its own merits: never level a second one
+    local maxed = {}
+    for _, u in pairs(p.units or {}) do if (u.level or 1) >= L.max then maxed[u.kind] = true end end
+    for id, u in pairs(p.units or {}) do
+        if not teamKinds[u.kind] and not maxed[u.kind] and (u.level or 1) < L.max then
+            local cur = bestOfKind[u.kind]
+            if not cur or (u.level or 1) > (p.units[cur].level or 1) then bestOfKind[u.kind] = id end
+        end
+    end
+    for kind, id in pairs(bestOfKind) do
+        local u = p.units[id]
+        local potential = C.M.unitScore({ kind = kind, level = L.max, trait = u.trait, g = u.g })
+        if weakest < math.huge and potential > weakest * 1.1 and (not prospectV or potential > prospectV) then
+            prospect, prospectV = id, potential
+        end
+    end
+    local why = ""
+    if prospect then
+        best = prospect
+        why = string.format(" [prospect: LV50 score %s > weakest team %s]", U.fmt(prospectV), U.fmt(weakest))
+    end
+    B.feedUseful = best ~= nil
+    if not best then return SF.status("Feed", "team is max level") end
+    local target = p.units[best]
+    local need = C.Catalog.totalXp({ level = L.max, xp = 0 }) - C.Catalog.totalXp(target)
+    local ids, items, gain = {}, {}, 0
+    -- same-kind fodder first (1.5x), then other fodder, then candy; never past max level
+    table.sort(fodder, function(a, b)
+        local sa, sb = a.u.kind == target.kind and 1 or 0, b.u.kind == target.kind and 1 or 0
+        if sa ~= sb then return sa > sb end
+        return a.s < b.s
+    end)
+    for _, f in ipairs(fodder) do
+        if gain >= need or #ids >= (L.feedMax or 60) then break end
+        if f.id ~= best then
+            table.insert(ids, f.id)
+            gain = gain + C.Catalog.feedXp(f.u, target.kind)
+        end
+    end
+    -- the daily quest wants 3 feeds: spread candy over separate feeds while it's unfinished
+    local day = C.Catalog.dayOf(os.time())
+    local dq
+    for _, q in ipairs(C.Catalog.QUESTS.daily) do if q.count == "feed" then dq = q end end
+    local prog, goal = 0, 0
+    if dq then prog, goal = C.Catalog.dailyProgress(p, dq, day) end
+    local split = dq and prog < goal
+    local function take(name, xpEach, have)
+        local n = 0
+        while have - n > 0 and gain + xpEach <= need + xpEach * 0.5 do
+            n = n + 1; gain = gain + xpEach
+            if split and n >= 1 then break end
+        end
+        if n > 0 then items[name] = n end
+    end
+    if not (split and #ids > 0) then
+        take("bigcandy", C.Catalog.ITEMS.bigcandy.xp, big)
+        if not (split and items.bigcandy) then take("candy", C.Catalog.ITEMS.candy.xp, candy) end
+    end
+    if #ids == 0 and not next(items) then return SF.status("Feed", "nothing worth feeding") end
+    local res, err = SF.request("Feed", C.R("Feed"), best, ids, next(items) and items or nil)
+    if type(res) == "table" and res.ok then
+        HUB.apply(res)
+        local nu = HUB.prof.units[best]
+        B.totals.feeds = B.totals.feeds + 1
+        local msg = string.format("%s LV %d→%d (+%d xp: %d units%s%s)%s", target.kind, target.level or 1, nu and nu.level or 0, gain, #ids,
+            items.bigcandy and (", " .. items.bigcandy .. " big candy") or "", items.candy and (", " .. items.candy .. " candy") or "", why)
+        SF.log(1, "FEED", msg)
+        SF.status("Feed", msg)
+    else
+        SF.status("Feed", "refused: " .. tostring(err))
+        SF.log(1, "FEED", "refused " .. tostring(err))
+    end
+end
+
+-- traits: crystals on the strongest team unit whose trait is below the keep threshold
+function HUB.traits()
+    if not CFG.traits then return SF.status("Traits", "off") end
+    local p = HUB.refresh()
+    if not p then return end
+    local crystals = HUB.items("crystal")
+    if crystals - CFG.crystalReserve < (C.Catalog.REROLL_COST or 1) then return SF.status("Traits", "no crystals (" .. crystals .. ")") end
+    -- a reroll replaces the trait outright, so only reroll when a fresh roll's expected value (the game's
+    -- own trait weights, VIP luck included) beats the current trait; gain is weighted by the unit's score
+    local luck = C.Catalog.traitLuck and C.Catalog.traitLuck(p) or nil
+    local ev = 0
+    for _, t in ipairs(C.Catalog.TRAIT_ORDER) do ev = ev + C.Catalog.traitChance(t, luck) * C.M.traitValue(t) end
+    -- the heroes the farm actually plays with (the normal best team), not whatever is equipped right now:
+    -- the raid / tournament teams are swapped in before launches, and their heroes shouldn't get chased
+    local okT, teamSlots = pcall(HUB.bestTeam)
+    teamSlots = okT and teamSlots or p.slots or {}
+    local best, bestG
+    for _, id in ipairs(teamSlots) do
+        local u = p.units[id]
+        if u and C.M.traitOrder(u.trait) < CFG.traitKeep then
+            local gain = (ev - C.M.traitValue(u.trait)) * C.M.unitScore(u)
+            if gain > 0 and (not bestG or gain > bestG) then best, bestG = id, gain end
+        end
+    end
+    -- the tournament plan's heroes aren't always on the normal team (Hunson is, for the board): one with no
+    -- trait or a Common one rolls up to Rare+ (~2 crystals, at most 20) even while saving for a Glob, since
+    -- the board counts every bit of its damage. Not the Glob hero mid-chase
+    local ts = B.tourneySim
+    local okW, wk = pcall(C.Catalog.tourneyWeekOf, os.time())
+    if CFG.tourney and ts and okW and ts.week == tostring(wk) and crystals - CFG.crystalReserve >= 3 then
+        local bestId = {}
+        for id, u in pairs(p.units) do
+            local s = C.M.unitScore(u)
+            if not bestId[u.kind] or s > bestId[u.kind].s then bestId[u.kind] = { id = id, s = s } end
+        end
+        for k in tostring(ts.team):gmatch("[%w_]+") do
+            local b = bestId[k]
+            local u = b and p.units[b.id]
+            if u and b.id ~= B.globChasing and C.M.traitOrder(u.trait) < 2 then
+                SF.log(1, "TRAIT", string.format("%s is on the tournament plan with %s: rolling it to Rare+", k, u.trait and ("a " .. tostring(u.trait) .. " trait") or "no trait"))
+                return HUB.chaseTrait(b.id, 2, math.max(CFG.crystalReserve, crystals - 20), 20)
+            end
+        end
+    end
+    -- chase: with a crystal stock, roll the strongest heroes (by their trait-free score) until each has a
+    -- Legendary+ trait (Hero of Ooo / Oh My Glob), one hero at a time, many rolls per lobby visit
+    if crystals - CFG.crystalReserve >= CFG.traitChaseAt then
+        local ranked = {}
+        for _, id in ipairs(teamSlots) do
+            local u = p.units[id]
+            if u then table.insert(ranked, { id = id, u = u, s = C.M.unitScore({ kind = u.kind, level = u.level, g = u.g }, true) }) end
+        end
+        table.sort(ranked, function(a, b) return a.s > b.s end)
+        -- a Glob chase in progress keeps going (across visits) until Glob or the floor
+        if B.globChasing and p.units[B.globChasing] then
+            local id = B.globChasing
+            if p.units[id].trait ~= "glob" and crystals > CFG.globFloor then HUB.chaseTrait(id, 5, CFG.globFloor) end
+            -- done: Glob landed, or the floor is reached → roll straight back to Legendary+ in this same visit
+            -- (the hero must not play matches on whatever Common trait the last roll left)
+            local u = HUB.prof.units[id]
+            if u and u.trait ~= "glob" and C.M.traitOrder(u.trait) < CFG.traitChaseKeep then
+                SF.log(1, "TRAIT", string.format("no Oh My Glob this time — rolling %s back to Legendary+ with the %d crystals kept", u.kind, HUB.items("crystal")))
+                HUB.chaseTrait(id, CFG.traitChaseKeep, CFG.crystalReserve, 1000)
+            end
+            B.globChasing = nil
+            SF.saveSoon()
+            return
+        end
+        -- only when the crystals in hand make the hero better on average than its trait today
+        -- (a Mathematical +25% hero needs ~75 crystals; a Common one is worth a chase with a few)
+        local waiting
+        for i = 1, math.min(CFG.traitChaseTop, #ranked) do
+            local r = ranked[i]
+            if C.M.traitOrder(r.u.trait) < CFG.traitChaseKeep then
+                local p, _, _, need, worth = C.M.chaseOdds(r.u.trait, crystals - CFG.crystalReserve, luck, CFG.traitChaseKeep)
+                if worth then return HUB.chaseTrait(r.id, CFG.traitChaseKeep, CFG.crystalReserve) end
+                waiting = waiting or string.format("saving crystals for Hero of Ooo on %s: %d / %s (now a chase would land it %d%% of the time — a miss leaves a random trait)",
+                    r.u.kind, crystals, need and tostring(need + CFG.crystalReserve) or "?", math.floor(p * 100 + 0.5))
+            end
+        end
+        if waiting and not (CFG.globChase and crystals >= CFG.globChaseAt) then return SF.status("Traits", waiting) end
+        -- Oh My Glob (+200% damage, 0.2%/roll): the battle sim's raid key. Each roll replaces the trait, so only
+        -- start with a stock that gives a real chance, and stop at a floor that can re-roll a Legendary
+        -- the strongest hero that doesn't have Glob yet (King Man has it → Lord of Evil is next)
+        local top
+        for _, r in ipairs(ranked) do if r.u.trait ~= "glob" then top = r break end end
+        if CFG.globChase and top and top.u.trait ~= "glob" and crystals >= CFG.globChaseAt then
+            B.globChasing = top.id
+            SF.saveSoon()
+            SF.log(1, "TRAIT", string.format("starting an Oh My Glob chase on %s with %d crystals", top.u.kind, crystals))
+            return HUB.chaseTrait(top.id, 5, CFG.globFloor)
+        end
+        if CFG.globChase and top and top.u.trait ~= "glob" then
+            return SF.status("Traits", string.format("saving crystals for an Oh My Glob chase on %s: %d / %d", top.u.kind, crystals, CFG.globChaseAt))
+        end
+    end
+    -- while saving for a Glob, crystals aren't spent on small single rerolls
+    if CFG.globChase and crystals < CFG.globChaseAt then best = nil end
+    if not best then return SF.status("Traits", string.format("top %d heroes have Legendary+ traits; others beat a reroll's expected +%.0f%% (crystals %d)", CFG.traitChaseTop, ev * 100, crystals)) end
+    local chasing = false
+    local u = p.units[best]
+    local before = u.trait
+    local res, err = SF.request("RerollTrait", C.R("RerollTrait"), best)
+    if type(res) == "table" and res.ok then
+        HUB.apply(res)
+        -- some reroll flows ask which trait to keep: keep the better one
+        if res.choices or res.pending or res.offer then
+            local offer = res.offer or res.pending or (res.choices and res.choices[1])
+            local keepNew = C.M.traitValue(offer) >= C.M.traitValue(before)
+            local sel = SF.request("SelectTrait", C.R("SelectTrait"), best, keepNew and offer or before)
+            HUB.apply(sel)
+        end
+        local after = HUB.prof.units[best] and HUB.prof.units[best].trait
+        B.totals.rerolls = B.totals.rerolls + 1
+        HUB.traitRecord(u.kind, "single reroll", 1, crystals - HUB.items("crystal"), before, after, C.M.traitValue(after) > C.M.traitValue(before))
+        local msg = string.format("%s: %s → %s%s", u.kind, tostring(before or "none"), tostring(after or res.trait or "?"), chasing and " (chasing Epic+)" or "")
+        SF.log(1, "TRAIT", msg)
+        SF.status("Traits", msg)
+    else
+        SF.status("Traits", "refused: " .. tostring(err))
+    end
+end
+
+-- where the crystals went: one entry per chase / single reroll, newest last (Lobby tab → Trait History)
+function HUB.traitRecord(kind, goal, rolls, spent, from, to, hit)
+    if (rolls or 0) <= 0 then return end
+    B.traitLog = B.traitLog or {}
+    table.insert(B.traitLog, { at = os.time(), clock = os.date("%H:%M"), kind = kind, goal = goal, rolls = rolls, spent = spent, from = from, to = to, hit = hit })
+    while #B.traitLog > 25 do table.remove(B.traitLog, 1) end
+    SF.saveSoon()
+end
+-- first run with the history: rebuild it from the TRAIT lines already in the log file
+function HUB.traitBackfill()
+    if B.traitLog then return end
+    B.traitLog = {}
+    local ok, src = pcall(function() return isfile(C.LOGFILE) and readfile(C.LOGFILE) or "" end)
+    if not ok then return end
+    local cost = C.Catalog.REROLL_COST or 1
+    local nextGoal
+    for line in tostring(src):gmatch("[^\n]+") do
+        local clock = line:match("^%[(%d+:%d+)")
+        if line:find("TRAIT", 1, true) then
+            if line:find("starting an Oh My Glob chase", 1, true) then nextGoal = "Oh My Glob"
+            elseif line:find("no Oh My Glob this time", 1, true) then nextGoal = "back to Legendary+"
+            else
+                local kind, name, rolls = line:match("TRAIT%s+(%w+) got (.-) after (%d+) rolls")
+                if kind then
+                    table.insert(B.traitLog, { clock = clock, kind = kind, goal = nextGoal or "Legendary+", rolls = tonumber(rolls), spent = tonumber(rolls) * cost, to = name, hit = true })
+                    nextGoal = nil
+                else
+                    local k2, r2, now, was, goal = line:match("TRAIT%s+(%w+): (%d+) rolls, still (%S+) %(was (%S+)%).-chasing (.+)$")
+                    if k2 then
+                        table.insert(B.traitLog, { clock = clock, kind = k2, goal = goal, rolls = tonumber(r2), spent = tonumber(r2) * cost, from = was, to = now, hit = false })
+                    end
+                end
+            end
+        end
+    end
+    while #B.traitLog > 25 do table.remove(B.traitLog, 1) end
+    SF.saveSoon()
+end
+-- the Trait History text: totals, then the newest entries in plain words
+function HUB.traitText()
+    local log = B.traitLog or {}
+    if #log == 0 then return "no trait rolls yet" end
+    local function heroName(k) return (C.Catalog.UNITS[k or ""] or {}).name or tostring(k) end
+    local function traitName(t)
+        local def = C.Catalog.TRAITS and C.Catalog.TRAITS[t or ""]
+        return def and def.name or tostring(t or "none")
+    end
+    local spent, globTry, globHit = 0, 0, 0
+    for i, e in ipairs(log) do
+        spent = spent + (tonumber(e.spent) or 0)
+        if e.goal == "Oh My Glob" then
+            -- a chase spread over several lobby visits is one chase: a miss that the same hero's next entry continues doesn't count
+            local cont = false
+            if not e.hit then
+                for j = i + 1, #log do
+                    if log[j].kind == e.kind then cont = log[j].goal == "Oh My Glob"; break end
+                end
+            end
+            if e.hit then globTry = globTry + 1; globHit = globHit + 1 elseif not cont then globTry = globTry + 1 end
+        end
+    end
+    local rows = { string.format("%d crystals spent over the last %d entries · Oh My Glob chases: %d won of %d", spent, #log, globHit, globTry) }
+    for i = #log, math.max(1, #log - 9), -1 do
+        local e = log[i]
+        local result = e.hit and ("got " .. traitName(e.to) .. " ✓") or ("missed, left on " .. traitName(e.to))
+        table.insert(rows, string.format("%s  %s · %s · %d rolls · %d crystals · %s", tostring(e.clock or "?"), heroName(e.kind),
+            tostring(e.goal), tonumber(e.rolls) or 0, tonumber(e.spent) or 0, result))
+    end
+    return table.concat(rows, "\n")
+end
+-- roll one hero's trait until it reaches CFG.traitChaseKeep (or the per-visit roll budget / crystals run out)
+function HUB.chaseTrait(id, keep, floor, budget)
+    keep, floor = keep or CFG.traitChaseKeep, floor or CFG.crystalReserve
+    local u0 = HUB.prof.units[id]
+    if not u0 then return end
+    local start = u0.trait
+    local c0 = HUB.items("crystal")
+    local goal = keep >= 5 and "Oh My Glob" or (keep >= 4 and "Legendary+" or "Rare+")
+    local goalName = (keep < 5 and floor == CFG.crystalReserve and B.globChasing == id) and ("back to " .. goal) or goal
+    local rolls = 0
+    local seen = {}
+    budget = budget or (keep >= 5 and CFG.globRollsPerVisit or CFG.traitRollsPerVisit)
+    while rolls < budget and HUB.items("crystal") - floor >= (C.Catalog.REROLL_COST or 1) do
+        local res, err = SF.request("RerollTrait", C.R("RerollTrait"), id)
+        SF.req.back["RerollTrait"] = nil
+        if not (type(res) == "table" and res.ok) then
+            if tostring(err):find("[Ss]low") then task.wait(1.5) else SF.status("Traits", "refused: " .. tostring(err)); break end
+        else
+            HUB.apply(res)
+            rolls = rolls + 1
+            B.totals.rerolls = B.totals.rerolls + 1
+            local t = HUB.prof.units[id] and HUB.prof.units[id].trait or res.trait
+            seen[tostring(t)] = (seen[tostring(t)] or 0) + 1
+            if C.M.traitOrder(t) >= keep then
+                local def = C.Catalog.TRAITS[t]
+                SF.log(1, "TRAIT", string.format("%s got %s after %d rolls (%d crystals left)", u0.kind, def and def.name or tostring(t), rolls, HUB.items("crystal")))
+                SF.status("Traits", string.format("%s → %s!", u0.kind, def and def.name or tostring(t)))
+                HUB.traitRecord(u0.kind, goalName, rolls, c0 - HUB.items("crystal"), start, def and def.name or tostring(t), true)
+                return
+            end
+            task.wait(0.3)
+        end
+    end
+    local now = HUB.prof.units[id] and HUB.prof.units[id].trait
+    SF.log(1, "TRAIT", string.format("%s: %d rolls, still %s (was %s) · %d crystals left · chasing %s", u0.kind, rolls, tostring(now), tostring(start), HUB.items("crystal"), goal))
+    SF.status("Traits", string.format("chasing %s on %s: %d rolls this visit, now %s", goal, u0.kind, rolls, tostring(now)))
+    HUB.traitRecord(u0.kind, goalName, rolls, c0 - HUB.items("crystal"), start, now, false)
+end
+
+-- stats: a reroll replaces every unlocked grade with a fresh roll (bell curve, mean ~10.5 of 20), so
+-- rerolling a good stat loses on average. The way up: lock the other two (3 juice + 100 gems) and reroll
+-- one stat until it lands at CFG.statGoal or better, then the next. DMG first, then SPA, strongest hero first.
+-- A chase is only started with enough juice to expect to finish it (a half-done chase can end lower).
+function HUB.stats()
+    if not CFG.stats or not C.UnitStats then return SF.status("Stats", "off") end
+    local p = HUB.refresh()
+    if not p then return end
+    local US = C.UnitStats
+    local juice = HUB.items(US.ITEM or "statroll") - CFG.juiceReserve
+    local cost, gemCost = US.cost(2)
+    local goal = CFG.statGoal
+    local pHit = 0
+    for i = goal, US.N do pHit = pHit + (US.WEIGHTS[i] or 0) end
+    pHit = pHit / 1000
+    local expJuice = cost / math.max(pHit, 0.01)
+    local gemsFree = function() return (tonumber(HUB.prof.gems) or 0) - CFG.statGemFloor - (CFG.evolve and C.EVO.gemReserve(HUB.prof) or 0) end
+    -- keep going with an unfinished chase, else pick the strongest team hero with DMG/SPA below the goal
+    local chase = B.statChase
+    if chase and not (p.units[chase.id] and US.decode(p.units[chase.id].g or "")) then chase = nil end
+    if chase and (US.decode(p.units[chase.id].g)[chase.stat] or 0) >= goal then chase = nil end
+    if not chase then
+        local order = {}
+        for _, id in ipairs(p.slots or {}) do if p.units[id] then table.insert(order, { id = id, s = C.M.unitScore(p.units[id]) }) end end
+        table.sort(order, function(a, b) return a.s > b.s end)
+        for _, stat in ipairs({ "dmg", "spa" }) do
+            for _, o in ipairs(order) do
+                local d = US.decode(p.units[o.id].g or "")
+                if d and (d[stat] or 0) < goal then chase = { id = o.id, stat = stat }; break end
+            end
+            if chase then break end
+        end
+        if not chase then B.statChase = nil; return SF.status("Stats", string.format("team DMG/SPA all at grade %d+ · juice %d", goal, juice)) end
+        if juice < expJuice * 1.5 or gemsFree() < gemCost * expJuice / cost * 1.5 then
+            return SF.status("Stats", string.format("next: %s %s → %d+ needs ~%d juice + %s gems · have %d juice", p.units[chase.id].kind, chase.stat, goal, expJuice, U.fmt(gemCost * expJuice / cost), juice))
+        end
+    end
+    B.statChase = chase
+    local u = p.units[chase.id]
+    local before = US.text(u.g)
+    local locks = {}
+    for _, k in ipairs(US.STATS) do if k ~= chase.stat then table.insert(locks, k) end end
+    local rolls = 0
+    while rolls < 60 and juice >= cost and gemsFree() >= gemCost do
+        local res, err = SF.request("RerollStats", C.R("RerollStats"), chase.id, locks)
+        if not (type(res) == "table" and res.ok) then
+            SF.status("Stats", "refused: " .. tostring(err))
+            SF.log(1, "STATS", "refused: " .. tostring(err))
+            break
+        end
+        HUB.apply(res)
+        rolls, juice = rolls + 1, juice - cost
+        local nu = HUB.prof.units[chase.id]
+        local d = nu and US.decode(nu.g or "")
+        if d and (d[chase.stat] or 0) >= goal then
+            SF.log(1, "STATS", string.format("%s %s hit grade %d after %d rolls: %s → %s", u.kind, chase.stat, d[chase.stat], rolls, before, US.text(nu.g)))
+            SF.status("Stats", string.format("%s %s → %d (%d rolls)", u.kind, chase.stat, d[chase.stat], rolls))
+            B.statChase = nil
+            SF.saveSoon()
+            return
+        end
+        task.wait(0.35)
+    end
+    local nu = HUB.prof.units[chase.id]
+    SF.log(1, "STATS", string.format("%s %s chase: %d rolls, now %s (was %s) · %d juice left", u.kind, chase.stat, rolls, US.text(nu and nu.g or u.g), before, juice))
+    SF.status("Stats", string.format("chasing %s %s → %d+ · %d juice left", u.kind, chase.stat, goal, juice))
+    SF.saveSoon()
+end
+
+-- move the character to a lobby station (Raid Gate, Enchiridion Shrine...) the way the lobby's own area
+-- travel does (Character:PivotTo); the server checks the player stands within `reach` of it
+function HUB.travel(moduleName)
+    local ok, mod = pcall(function() return require(C.root:FindFirstChild(moduleName)) end)
+    if not ok or type(mod) ~= "table" or type(mod.spot) ~= "function" then return false end
+    local spot = mod.spot()
+    local char = LP.Character
+    local hrp = char and char:FindFirstChild("HumanoidRootPart")
+    if not (hrp and spot and spot.pos) then return false end
+    if (Vector3.new(hrp.Position.X - spot.pos.X, 0, hrp.Position.Z - spot.pos.Z)).Magnitude <= (spot.radius or 10) then return true end
+    local face = spot.face and Vector3.new(spot.face.X, spot.pos.Y, spot.face.Z) or (spot.pos + Vector3.new(0, 0, 1))
+    pcall(function() char:PivotTo(CFrame.lookAt(spot.pos + Vector3.new(0, 3, 0), face + Vector3.new(0, 3, 0))) end)
+    hrp.AssemblyLinearVelocity = Vector3.zero
+    task.wait(1.2) -- let the server see the new position
+    return true
+end
+
+-- the Teller's candy shop (Halloween): the Elder Vampire + 5 Vampire Essence evolve into The Dark Cloud
+-- (S tier). Buys only once the whole price is in, so candy never sits in the weak half-step; Evolve does the rest
+function HUB.teller()
+    if not (CFG.teller and CFG.sTierEvolve) then return SF.status("Teller", "off") end
+    local p = HUB.refresh()
+    if not p then return end
+    local TR = RS:FindFirstChild("TellerRemotes")
+    local buy = TR and TR:FindFirstChild("Buy")
+    if not buy then return SF.status("Teller", "shop closed") end
+    local own = {}
+    for _, u in pairs(p.units or {}) do own[u.kind] = true end
+    if own.VampireKingCloud then return SF.status("Teller", "The Dark Cloud owned ✓") end
+    local okT, T = pcall(function() return require(C.root:FindFirstChild("HubTeller")) end)
+    local function price(id) return okT and type(T) == "table" and T.price and T.price(id, 1) or (id == "VampireKing" and 15000 or 1000) end
+    local candy = HUB.items("hwcandy")
+    local needEss = math.max(0, 5 - HUB.items("vampessence"))
+    local cost = (own.VampireKing and 0 or price("VampireKing")) + needEss * price("vampessence")
+    if cost == 0 then return SF.status("Teller", "Elder Vampire + 5 Vampire Essence in: evolving into The Dark Cloud") end
+    if candy < cost then
+        return SF.status("Teller", string.format("saving Halloween Candy for The Dark Cloud: %s/%s", U.fmt(candy), U.fmt(cost)))
+    end
+    HUB.travel("HubTeller") -- "The Teller only serves at his shop!"
+    local function get(id, n)
+        local res, err = SF.request("TellerBuy", buy, id, n)
+        if type(res) == "table" and res.ok then
+            if type(res.profile) == "table" then HUB.setProfile(res.profile) else HUB.refresh(true) end
+            SF.log(1, "TELLER", string.format("bought %dx %s", n, id))
+            return true
+        end
+        local why = tostring(err or (type(res) == "table" and (res.reason or res.msg)) or "no answer")
+        SF.log(1, "TELLER", id .. " refused: " .. why)
+        SF.status("Teller", id .. " refused: " .. why)
+        SF.backoff("TellerBuy", 300)
+        return false
+    end
+    if not own.VampireKing and not get("VampireKing", 1) then return end
+    if needEss > 0 then
+        task.wait(0.6)
+        if needEss == 5 then
+            if not get("vampessence", 5) then return end
+        else
+            for _ = 1, needEss do
+                if not get("vampessence", 1) then return end
+                task.wait(0.6)
+            end
+        end
+    end
+    SF.status("Teller", "bought the Elder Vampire + Vampire Essence: evolving into The Dark Cloud")
+end
+
+-- evolve: when an evolution's items + gems are in and the evolved hero scores higher, do it
+function HUB.evolve()
+    if not CFG.evolve then return SF.status("Evolve", "off") end
+    local p = HUB.refresh()
+    if not p then return end
+    local list = C.EVO.list(p)
+    -- while the focus evolution is still collecting, others may not eat the items it needs
+    local focus
+    for _, e in ipairs(list) do if e.focus and not e.ready then focus = e end end
+    local best
+    for _, e in ipairs(list) do
+        local clash = false
+        if focus and e ~= focus then for k in pairs(e.flat or {}) do if focus.flat[k] and k ~= "page" then clash = true end end end
+        if e.ready and e.gain > 0 and not clash and (not best or e.gain > best.gain) then best = e end
+    end
+    if not best then
+        local near = focus
+        if not near then for _, e in ipairs(list) do if e.sTier and not e.ready then near = e break end end end
+        near = near or list[1]
+        local missing = {}
+        for k, n in pairs(near and near.flat or {}) do
+            local have = tonumber(p.items and p.items[k]) or 0
+            if have < n then table.insert(missing, string.format("%s %d/%d", k, have, n)) end
+        end
+        return SF.status("Evolve", near and string.format("%s: %s from %s · items %.0f%%%s%s", near.focus and "focus" or (near.sTier and "S-tier goal" or "closest"), near.target, near.def.from, near.progress * 100,
+            #missing > 0 and (" · need " .. table.concat(missing, ", ")) or "",
+            (near.def.gems or 0) > 0 and (" · " .. near.def.gems .. " gems") or "") or "no evolutions available")
+    end
+    -- crafted items first ("Items are crafted at the Crafting Table!")
+    for _, cr in ipairs(best.crafts or {}) do
+        HUB.travel("HubCraft")
+        for _ = 1, cr.count do
+            local res, err = SF.request("Craft", C.R("Craft"), cr.id)
+            if type(res) == "table" and res.ok then
+                if type(res.profile) == "table" then HUB.setProfile(res.profile) else HUB.refresh(true) end
+                SF.log(1, "CRAFT", "crafted " .. cr.id .. " for " .. best.target)
+            else
+                SF.log(1, "CRAFT", cr.id .. " refused: " .. tostring(err))
+                SF.status("Evolve", "craft " .. cr.id .. " refused: " .. tostring(err))
+                SF.backoff("Craft", 120)
+                return
+            end
+            task.wait(0.6)
+        end
+    end
+    HUB.travel("HubShrine") -- "Heroes evolve at the Enchiridion Shrine!"
+    local res, err = SF.request("EvolveUnit", C.R("EvolveUnit"), best.base.id, best.target, best.partner and best.partner.id or nil)
+    if type(res) == "table" and res.ok then
+        HUB.apply(res)
+        local msg = string.format("%s → %s%s", best.def.from, best.target, best.partner and (" (with " .. best.def.with .. ")") or "")
+        SF.log(1, "EVOLVE", msg)
+        SF.status("Evolve", msg)
+    else
+        SF.status("Evolve", best.target .. " refused: " .. tostring(err))
+        SF.log(1, "EVOLVE", best.target .. " refused: " .. tostring(err))
+        SF.backoff("EvolveUnit", 120)
+    end
+end
+
+-- is a pull worth it? Every copy of an owned hero is just backpack filler (all heroes cap at Lv50 and
+-- the team holds one of each), so only pull while the banner offers a hero we don't have yet
+function C.M.summonNew(p)
+    if not CFG.summonOnlyNew then return true, "any" end
+    local okO, odds = pcall(C.Catalog.summonOdds, os.time(), C.Catalog.summonLuck(p))
+    if not (okO and type(odds) == "table" and type(odds.kinds) == "table") then return true, "odds unknown" end
+    local own = {}
+    for _, u in pairs(p.units or {}) do own[u.kind] = true end
+    local new, total = {}, 0
+    for kind, ch in pairs(odds.kinds) do
+        local evo = C.Catalog.evolutionOf and C.Catalog.evolutionOf(kind)
+        if not own[kind] and not (evo and own[evo]) then total = total + (tonumber(ch) or 0); table.insert(new, kind) end
+    end
+    if total >= CFG.summonNewChance then return true, table.concat(new, ",") end
+    return false, string.format("every hero on the banner is owned (new: %s at %.2f%%/pull)", #new > 0 and table.concat(new, ",") or "none", total * 100)
+end
+
+-- event banner (Halloween: Catalog.EVENT_BANNER, HubRemotes.SummonEvent(n), 50 / 500 candy): pull while it
+-- has heroes we don't own at ≥ CFG.bannerNewChance a pull, with only the candy above what an evolution still
+-- needs (Marshall Lee → Vampire King takes 5,000). 81% of pulls are Night skins; a duplicate skin refunds 30
+function HUB.eventBanner(depth)
+    if not CFG.eventBanner then return SF.status("Banner", "off") end
+    local Cat = C.Catalog
+    local EB = Cat.EVENT_BANNER
+    if not (EB and Cat.eventOn and Cat.eventOn()) then return SF.status("Banner", "no event banner running") end
+    local p = HUB.refresh()
+    if not p then return end
+    local chance, new = C.M.bannerNew(p)
+    if chance < CFG.bannerNewChance then
+        return SF.status("Banner", string.format("%s: nothing new worth pulling (%.1f%% a pull%s)", EB.name, chance * 100, #new > 0 and (": " .. table.concat(new, ", ")) or ""))
+    end
+    local cur = EB.currency or "hwcandy"
+    local reserve = C.M.candyReserve(p)
+    local spare = HUB.items(cur) - reserve
+    local one, ten = tonumber(EB.one) or 50, tonumber(EB.ten) or 500
+    if spare < one then
+        return SF.status("Banner", string.format("%s: %s (%.0f%% a pull) · candy %s%s", EB.name, table.concat(new, ", "), chance * 100,
+            U.fmt(HUB.items(cur)), reserve > 0 and (" · holding " .. U.fmt(reserve) .. " for an evolution") or ""))
+    end
+    local inv, max = Cat.unitCount(p), Cat.inventoryMax(p)
+    if inv + 1 > max then return SF.status("Banner", string.format("backpack %d/%d full (feed will clear spares)", inv, max)) end
+    local n = (spare >= ten and inv + 10 <= max) and 10 or 1
+    local res, err = SF.request("SummonEvent", C.R("SummonEvent"), n)
+    if not (type(res) == "table" and res.ok) then
+        local why = tostring(type(res) == "table" and res.reason or err)
+        SF.log(1, "BANNER", "refused: " .. why)
+        SF.backoff("SummonEvent", 300)
+        return SF.status("Banner", "refused: " .. why)
+    end
+    if type(res.profile) == "table" then HUB.setProfile(res.profile) else HUB.refresh(true) end
+    local got, heroes = {}, {}
+    for _, c in ipairs(type(res.results) == "table" and res.results or {}) do
+        if c.skin then
+            table.insert(got, tostring(c.skin) .. (c.dup and string.format(" (dupe, +%s back)", tostring(c.refund or EB.refund or 30)) or ""))
+        else
+            table.insert(got, tostring(c.kind) .. (c.new and " NEW!" or ""))
+            if c.new or c.secret then table.insert(heroes, Cat.UNITS[c.kind] and Cat.UNITS[c.kind].name or tostring(c.kind)) end
+        end
+    end
+    local msg = string.format("%dx for %d candy → %s", n, n == 10 and ten or one, #got > 0 and table.concat(got, ", ") or "ok")
+    SF.log(1, "BANNER", msg)
+    SF.status("Banner", msg)
+    if #heroes > 0 and SF.notify then SF.notify("Halloween Banner", "New hero: " .. table.concat(heroes, ", ") .. "!", "success") end
+    HUB.busyUntil = U.now() + 2
+    -- keep pulling this visit while it's still worth it (each pull may have changed what's new)
+    if (depth or 0) < 8 then
+        task.wait(0.8)
+        return HUB.eventBanner((depth or 0) + 1)
+    end
+end
+
+-- summon: 10-pulls (cheaper per unit + Epic floor) whenever gems allow; logs odds, featured and pity
+function HUB.summon()
+    if not CFG.summon then return SF.status("Summon", "off") end
+    local p = HUB.refresh()
+    if not p then return end
+    local n = CFG.summonTen and 10 or 1
+    local cost = C.Catalog.summonCost(p, n)
+    local inv, max = C.Catalog.unitCount(p), C.Catalog.inventoryMax(p)
+    local okO, odds = pcall(C.Catalog.summonOdds, os.time(), C.Catalog.summonLuck(p))
+    local feat = okO and odds.featured or "?"
+    local pity = tonumber(p.pity) or 0
+    local info = string.format("featured %s · pity %d/%d", tostring(feat), pity, C.Catalog.SUMMON.pity)
+    -- an evolution that's close (≥60% of its items) gets its gem cost held back
+    local evoRes, evo = 0, nil
+    if CFG.evolve then evoRes, evo = C.EVO.gemReserve(p) end
+    local reserve = CFG.gemReserve + evoRes
+    if (p.gems or 0) - reserve < cost then
+        return SF.status("Summon", string.format("saving: %s/%s gems%s · %s", U.fmt(p.gems), U.fmt(cost + reserve),
+            evo and (" (holding " .. evoRes .. " for " .. evo.target .. ")") or "", info))
+    end
+    if inv + n > max then
+        return SF.status("Summon", string.format("inventory %d/%d full (feed will clear spares)", inv, max))
+    end
+    local worth, why = C.M.summonNew(p)
+    if not worth then return SF.status("Summon", "holding gems: " .. why .. " · " .. info) end
+    local res, err = SF.request("Summon", C.R("Summon"), n)
+    if type(res) == "table" and res.ok then
+        HUB.apply(res)
+        B.totals.summons = B.totals.summons + n
+        local got = {}
+        for _, c in ipairs(res.cards or res.results or res.units or {}) do
+            local kind = type(c) == "table" and (c.kind or (c.unit and c.unit.kind)) or tostring(c)
+            local rar = type(c) == "table" and c.rarity or (C.Catalog.UNITS[kind] and C.Catalog.UNITS[kind].rarity) or "?"
+            table.insert(got, kind .. "(" .. tostring(rar):sub(1, 1) .. ")")
+        end
+        local msg = string.format("%dx for %d gems → %s", n, cost, #got > 0 and table.concat(got, " ") or "ok")
+        SF.log(1, "SUMMON", msg)
+        SF.status("Summon", msg)
+        HUB.busyUntil = U.now() + 2
+        -- spend every affordable pull on this trip (the launch would otherwise leave gems for later)
+        HUB.summonDepth = (HUB.summonDepth or 0) + 1
+        if HUB.summonDepth < 6 and (tonumber(HUB.prof.gems) or 0) - reserve >= cost then
+            task.wait(0.6)
+            HUB.summon()
+        end
+        HUB.summonDepth = 0
+    else
+        SF.status("Summon", "refused: " .. tostring(err))
+        SF.log(1, "SUMMON", "refused " .. tostring(err))
+    end
+end
+
+-- the team a raid would use, as a sorted kind list (CFG.raidTeam kinds, else the battle sim's pick
+-- B.raidBest, then filled from the normal slots)
+function C.MODE.raidWant()
+    local src = (CFG.raidTeam and CFG.raidTeam ~= "") and CFG.raidTeam or (B.raidBest or "")
+    local want = {}
+    for k in tostring(src):gmatch("[%w_]+") do table.insert(want, k) end
+    return want, src
+end
+function C.MODE.raidTeamKey(prof)
+    prof = prof or B.prof or {}
+    local kinds, seen = {}, {}
+    for _, k in ipairs((C.MODE.raidWant())) do if not seen[k] then table.insert(kinds, k); seen[k] = true end end
+    for _, id in ipairs(prof.slots or {}) do
+        local u = prof.units and prof.units[id]
+        if u and #kinds < 6 and not seen[u.kind] then table.insert(kinds, u.kind); seen[u.kind] = true end
+    end
+    table.sort(kinds)
+    return table.concat(kinds, ",")
+end
+-- raid team: the battle-sim pick (CFG.raidTeam kinds, best copy of each), filled up with the normal team
+function HUB.setRaidTeam()
+    local want, src = C.MODE.raidWant()
+    return HUB.setKindsTeam(want, "RAID", "raid team set: " .. src)
+end
+-- equip these kinds (best copy of each), filled up with the current slots; true when set or already set
+function HUB.setKindsTeam(want, tag, msg)
+    local p = HUB.prof
+    if #want == 0 then return true end
+    local bestId = {}
+    for id, u in pairs(p.units or {}) do
+        local s = C.M.unitScore(u)
+        if not bestId[u.kind] or s > bestId[u.kind].s then bestId[u.kind] = { id = id, s = s } end
+    end
+    local slots, used = {}, {}
+    for _, k in ipairs(want) do
+        if bestId[k] and #slots < C.Catalog.SLOTS then table.insert(slots, bestId[k].id); used[bestId[k].id] = true end
+    end
+    for _, id in ipairs(p.slots or {}) do
+        if #slots < C.Catalog.SLOTS and id ~= "" and not used[id] then table.insert(slots, id); used[id] = true end
+    end
+    while #slots < C.Catalog.SLOTS do table.insert(slots, "") end
+    local same = true
+    for i = 1, C.Catalog.SLOTS do if (p.slots[i] or "") ~= slots[i] then same = false end end
+    if same then return true end
+    local res, err = SF.request("SetSlots", C.R("SetSlots"), slots)
+    if type(res) == "table" and res.ok then
+        HUB.apply(res)
+        SF.log(1, tag, msg)
+        return true
+    end
+    SF.log(1, tag, "team refused: " .. tostring(err))
+    return false
+end
+-- a normal map with a trusted clear plan (MT.clearCheck) plays with the plan's team
+function HUB.setPlanTeam(m)
+    local plan = C.MODE.clearPlan(m)
+    if not plan then return end
+    local want = {}
+    for k in tostring(plan.team):gmatch("[%w_]+") do table.insert(want, k) end
+    HUB.setKindsTeam(want, "PLAN", string.format("team for %s: %s (%s)", C.MODE.describe(m), table.concat(want, " "),
+        plan.inf and string.format("sim wave %d vs ~%d now", plan.wave or 0, math.floor(plan.real or 0))
+        or string.format("sim %ds vs %ds now", math.floor(plan.t or 0), math.floor(plan.real or 0))))
+end
+-- the usable clear plan for a mode: made for this roster's heroes, trusted (the sim matched real times on
+-- this map), not rejected by real runs, fresh
+function C.MODE.clearPlan(m)
+    if not CFG.clearPlans or m.raid or m.tourney then return nil end
+    local plan = B.clearPlan and B.clearPlan[C.MODE.key(m)]
+    if not (plan and plan.trusted and not plan.rejected and plan.team) then return nil end
+    if os.time() - (tonumber(plan.at) or 0) > 24 * 3600 then return nil end
+    return plan
+end
+-- raid: set the raid team, travel to the Raid Gate (the lobby's own area travel moves the character the
+-- same way), OpenRaid (uses a key), StartRaid → teleport
+function HUB.launchRaid(m)
+    HUB.setRaidTeam()
+    if not HUB.travel("HubRaid") then SF.log(0, "RAID", "couldn't reach the Raid Gate"); return end
+    local res, err = SF.request("OpenRaid", C.R("OpenRaid"))
+    if not (type(res) == "table" and res.ok) then
+        SF.log(1, "RAID", "OpenRaid refused: " .. tostring(err))
+        SF.status("Mode", "raid refused: " .. tostring(err))
+        HUB.createFails = (HUB.createFails or 0) + 1
+        if HUB.createFails >= 2 then C.MODE.banned[C.MODE.key(m)] = os.time() + 600; HUB.createFails = 0 end
+        return
+    end
+    HUB.createFails = 0
+    SF.log(1, "RAID", "raid opened (key used) — starting")
+    task.wait(1)
+    local st, err2
+    for _ = 1, 5 do
+        st, err2 = SF.request("StartRaid", C.R("StartRaid"))
+        if type(st) == "table" and st.ok then break end
+        SF.req.back["StartRaid"] = nil
+        task.wait(1.5)
+    end
+    if type(st) == "table" and st.ok then
+        B.pending = { stage = m.stage, raid = true, power = m.power, at = os.time() }
+        B.sinceHub = 0
+        SF.saveNow()
+        SF.status("Mode", "teleporting · RAID")
+        HUB.busyUntil = U.now() + 60
+        HUB.launched = true
+        task.delay(60, function() HUB.launched = false end) -- teleport failed: resume after a minute
+    else
+        SF.log(1, "RAID", "StartRaid refused: " .. tostring(err2) .. " — closing the raid (keeps the key)")
+        SF.request("LeaveRaid", C.R("LeaveRaid"))
+    end
+end
+
+-- Lich Lair: OpenPortal (uses a Lich Portal, opens a portal party in front of us) → StartMatch
+function HUB.launchPortal(m)
+    -- "Stand on the ground to open it!": right after a station travel the character is still falling
+    local hum = LP.Character and LP.Character:FindFirstChildOfClass("Humanoid")
+    for _ = 1, 30 do
+        if not hum or hum.FloorMaterial ~= Enum.Material.Air then break end
+        task.wait(0.2)
+    end
+    task.wait(0.3)
+    local cam = workspace.CurrentCamera
+    local res, err = SF.request("OpenPortal", C.R("OpenPortal"), cam and cam.CFrame.LookVector or Vector3.new(0, 0, -1))
+    if not (type(res) == "table" and res.ok) then
+        SF.log(1, "PORTAL", "OpenPortal refused: " .. tostring(err))
+        SF.status("Mode", "portal refused: " .. tostring(err))
+        HUB.createFails = (HUB.createFails or 0) + 1
+        if HUB.createFails >= 2 then C.MODE.banned[C.MODE.key(m)] = os.time() + 900; HUB.createFails = 0 end
+        return
+    end
+    HUB.createFails = 0
+    SF.log(1, "PORTAL", "Lich Portal opened (portal used) — starting")
+    task.wait(1)
+    local st, err2
+    for _ = 1, 5 do
+        st, err2 = SF.request("StartMatch", C.R("StartMatch"))
+        if type(st) == "table" and st.ok then break end
+        SF.req.back["StartMatch"] = nil
+        task.wait(1.5)
+    end
+    if type(st) == "table" and st.ok then
+        B.pending = { stage = m.stage, portal = true, diff = m.diff, power = m.power, at = os.time() }
+        B.sinceHub = 0
+        SF.saveNow()
+        SF.status("Mode", "teleporting · " .. C.MODE.describe(m))
+        HUB.busyUntil = U.now() + 60
+        HUB.launched = true
+        task.delay(60, function() HUB.launched = false end)
+    else
+        SF.log(1, "PORTAL", "StartMatch refused: " .. tostring(err2))
+        SF.request("LeaveMatch", C.R("LeaveMatch"))
+    end
+end
+
+-- tournament info (week, element buff/debuff, my best/runs/rewards got) from the server
+function HUB.tourneyFetch()
+    if not CFG.tourney then return SF.status("Tourney", "off") end
+    local rf = C.R("GetTourney")
+    if not rf then return SF.status("Tourney", "no tournament remote") end
+    for _ = 1, 3 do
+        local ok, r = pcall(rf.InvokeServer, rf, false)
+        if ok and type(r) == "table" and type(r.week) == "table" then
+            C.tourneyInfo = r
+            B.tourneyInfo = { week = r.week, mine = r.mine, at = os.time() } -- the match side decides with this
+            local mine = type(r.mine) == "table" and r.mine or {}
+            local got = {}
+            for k, v in pairs(type(mine.got) == "table" and mine.got or {}) do table.insert(got, type(v) == "string" and v or tostring(k)) end
+            local why = C.MODE.tourneyWanted(HUB.prof or B.prof)
+            return SF.status("Tourney", string.format("week %s · best %s · runs %s · rewards got: %s · %s", tostring(r.week.n), U.fmt(mine.best), tostring(mine.runs or 0),
+                #got > 0 and table.concat(got, ",") or "none", why and ("next: " .. why) or "nothing to gain now"))
+        end
+        if not (ok and type(r) == "table" and r.wait) then break end
+        task.wait(1.2)
+    end
+end
+-- tournament team: the week's buffed element hits x2 and the debuffed x0.5, so rank heroes by score × that
+function HUB.tourneyTeam()
+    local p = HUB.prof
+    local T = C.Catalog.TOURNEY
+    local okW, week = pcall(C.Catalog.tourneyAt, os.time())
+    if not (okW and type(week) == "table") then return true end
+    -- the planner's pick for this week (MT.tourneyCheck: simulated damage), best copy of each kind; else the
+    -- same combination search as the normal team (pair passives), with each hero scaled by the element mult
+    local slots, names, src = {}, {}, "planner"
+    local ts = B.tourneySim
+    if ts and ts.week == tostring(week.n) then
+        local bestId = {}
+        for id, u in pairs(p.units or {}) do
+            local s = C.M.unitScore(u)
+            if not bestId[u.kind] or s > bestId[u.kind].s then bestId[u.kind] = { id = id, s = s } end
+        end
+        for k in tostring(ts.team):gmatch("[%w_]+") do
+            if bestId[k] and #slots < C.Catalog.SLOTS then table.insert(slots, bestId[k].id); table.insert(names, k) end
+        end
+    end
+    if #slots < C.Catalog.SLOTS then
+        local chosen
+        slots, chosen = HUB.bestTeam(function(kind) return (C.Catalog.tourneyMult(week, kind) or 1) * C.M.tierMult(kind, "Tourney") end)
+        names, src = {}, "score"
+        for i, v in ipairs(chosen) do names[i] = v.u.kind end
+    end
+    while #slots < C.Catalog.SLOTS do table.insert(slots, "") end
+    local same = true
+    for i = 1, C.Catalog.SLOTS do if (p.slots[i] or "") ~= slots[i] then same = false end end
+    if same then return true end
+    local res, err = SF.request("SetSlots", C.R("SetSlots"), slots)
+    if type(res) == "table" and res.ok then
+        HUB.apply(res)
+        SF.log(1, "TOURNEY", string.format("team for %s week (buff %s ×%s, debuff %s ×%s, picked by %s): %s", tostring(week.world), tostring(week.buff), tostring(T.buff),
+            tostring(week.debuff), tostring(T.debuff), src, table.concat(names, " ")))
+        return true
+    end
+    SF.log(1, "TOURNEY", "team refused: " .. tostring(err))
+    return false
+end
+function HUB.launchTourney(m)
+    HUB.tourneyTeam()
+    local st, err
+    for _ = 1, 3 do
+        st, err = SF.request("StartTourney", C.R("StartTourney"))
+        if type(st) == "table" and st.ok and not st.already then break end
+        SF.req.back["StartTourney"] = nil
+        task.wait(1.5)
+    end
+    if type(st) == "table" and st.ok then
+        local wk = tostring(C.tourneyInfo and C.tourneyInfo.week and C.tourneyInfo.week.n or "")
+        local ts = B.tourneySim
+        B.tourney = { week = wk, power = m.power or C.MODE.teamPower(HUB.prof), at = os.time(),
+            plan = ts and ts.week == wk and C.MODE.tourneyPlan(ts) or nil, pred = ts and ts.week == wk and ts.score or nil }
+        B.pending = { stage = tonumber(st.stage) or 0, tourney = true, power = m.power, at = os.time() }
+        B.sinceHub = 0
+        SF.log(1, "TOURNEY", "tournament started (" .. tostring(m.why) .. ")")
+        SF.saveNow()
+        SF.status("Mode", "teleporting · tournament")
+        HUB.busyUntil = U.now() + 60
+        HUB.launched = true
+        task.delay(60, function() HUB.launched = false end)
+    else
+        SF.log(1, "TOURNEY", "StartTourney refused: " .. tostring(err))
+        C.MODE.banned.tr = os.time() + 1800
+    end
+end
+
+-- play: pick the best mode and launch it
+function HUB.play()
+    if not CFG.play then return SF.status("Mode", "off") end
+    if U.now() < HUB.busyUntil then return end
+    local p = HUB.refresh(true)
+    if not p then return end
+    if C.Catalog.teamSize(p) == 0 then return SF.status("Mode", "no team") end
+    local m = C.MODE.pick(p)
+    if not m then return SF.status("Mode", "no playable mode") end
+    SF.status("Mode", "launching " .. C.MODE.describe(m))
+    SF.log(1, "MODE", "pick " .. C.MODE.describe(m) .. "  ·  ranking: " .. tostring(C.MODE.lastTop) .. (C.MODE.raidGate and ("  ·  " .. C.MODE.raidGate) or ""))
+    if m.raid then return HUB.launchRaid(m) end
+    if m.portal then return HUB.launchPortal(m) end
+    if m.tourney then return HUB.launchTourney(m) end
+    pcall(HUB.setPlanTeam, m)
+    local res, err = SF.request("CreateMatch", C.R("CreateMatch"), m.stage, m.challenge, m.infinite == true)
+    if not (type(res) == "table" and res.ok) then
+        HUB.createFails = (HUB.createFails or 0) + 1
+        SF.log(1, "MODE", "CreateMatch refused: " .. tostring(err) .. " · leaving old lobby")
+        SF.request("LeaveMatch", C.R("LeaveMatch"))
+        SF.backoff("CreateMatch", 3)
+        if HUB.createFails >= 2 then
+            C.MODE.banned[C.MODE.key(m)] = os.time() + 600
+            HUB.createFails = 0
+            SF.log(1, "MODE", "banning " .. C.MODE.key(m) .. " for 10 min")
+        end
+        return
+    end
+    HUB.createFails = 0
+    task.wait(0.5)
+    local st, err2 = SF.request("StartMatch", C.R("StartMatch"))
+    if type(st) == "table" and st.ok then
+        B.pending = {
+            stage = m.stage, challenge = m.challenge, infinite = m.infinite, first = m.first,
+            manual = m.manual, manualWorld = m.manualWorld, manualAct = m.manualAct,
+            diff = m.diff, power = m.power, at = os.time(),
+        }
+        if m.challenge then B.challengeLast = m.challenge end
+        B.sinceHub = 0
+        SF.saveNow()
+        SF.status("Mode", "teleporting · " .. C.MODE.describe(m))
+        HUB.busyUntil = U.now() + 45
+        HUB.launched = true
+        task.delay(45, function() HUB.launched = false end)
+    else
+        SF.status("Mode", "StartMatch refused: " .. tostring(err2))
+        SF.request("LeaveMatch", C.R("LeaveMatch"))
+    end
+end
+
+-- ============================================================
+--  MATCH BRAIN
+-- ============================================================
+local MT = { towers = {}, money = 0, wave = 0, lives = 0, enemies = 0, running = false, over = false,
+             dmg = {}, pred = {}, atkDmg = {}, levelsCache = {}, cov = {}, blockedKind = {}, abilityAt = {}, info = nil,
+             waveT = 0, busyT = 0, leakWave = false, expo = {}, idleWaves = {}, runLeaks = 0, earlyCalls = 0, aggr = 1 }
+function MT.W() return MT.ToonKit and MT.ToonKit.WORLD or (1 / 3) end
+function MT.levels(kind)
+    if MT.levelsCache[kind] ~= nil then return MT.levelsCache[kind] end
+    local mod = C.root:FindFirstChild(kind .. "TD")
+    local ok, t = pcall(function() return mod and require(mod) end)
+    local L = ok and type(t) == "table" and (t.LEVELS or (t.lib and t.lib.LEVELS)) or false
+    MT.levelsCache[kind] = L
+    return L
+end
+-- In the match the game rewrites your heroes' LEVELS tables in place with your own multipliers (Jake L1
+-- 41 → 355 at LV50). A table whose first row is well above the base row is already scaled.
+function MT.prescaled(kind)
+    local L = MT.levels(kind)
+    local base = B.rows and B.rows[kind]
+    return L and L[1] and base and base.dmg and L[1].dmg > base.dmg * 1.3 or false
+end
+-- the game's own in-match stats: LEVELS row × level damage mult × trait × grade (UnitBase.placement)
+function MT.mults(kind)
+    local info = MT.info or {}
+    -- tournament weeks buff one element ×2 and debuff one ×0.5 (applied live, not in the LEVELS tables)
+    local elem = 1
+    if MT.tourney then
+        MT.tourneyWeek = MT.tourneyWeek or select(2, pcall(C.Catalog.tourneyAt, os.time()))
+        local okT, e = pcall(C.Catalog.tourneyMult, MT.tourneyWeek, kind)
+        elem = okT and tonumber(e) or 1
+    end
+    if MT.prescaled(kind) then
+        local tm = C.Catalog.traitMults(info.traits and info.traits[kind])
+        return { dmg = ((MT.mods and MT.mods.dmg) or 1) * elem, range = 1, speed = 1, cost = tm.cost }
+    end
+    local lv = info.levels and info.levels[kind] or 1
+    local tm = C.Catalog.traitMults(info.traits and info.traits[kind])
+    local gm = C.M.gradeMults(info.grades and info.grades[kind])
+    local mods = MT.mods or {}
+    return {
+        dmg = C.Catalog.damageMult(lv) * tm.dmg * gm.dmg * (mods.dmg or 1) * elem,
+        range = tm.range * gm.range,
+        speed = tm.speed * gm.speed,
+        cost = tm.cost,
+    }
+end
+-- multi-target: `hits` enemies, extras take `splash`; plain aoe hits roughly one enemy per 4 studs of radius
+-- expected enemies hit per attack, from the row's own fields: zone="range" hits everyone in range,
+-- aoe/line hit a crowd (≈ one enemy per 3 studs of radius on busy waves), hits+splash a few extras
+-- How many enemies one attack really hits. Weights fitted to 30 attacks' measured damage (Oct 28):
+-- whole-range zones hit ~2x the old cap of 6 (crowds), every projectile is a full hit, the main target
+-- always takes the whole hit. v1 = the formula before that fit (only to rescale learning made with it)
+function MT.targets(row, v1)
+    local t
+    if row.zone == "range" then t = v1 and 6 or 12
+    elseif row.hits and row.splash then t = 1 + (row.hits - 1) * row.splash
+    elseif row.aoe then t = U.clamp(row.aoe / 3, 1, 6) * (row.splash and (0.4 + 0.6 * row.splash) or 1)
+    elseif row.line then t = U.clamp(row.line / 8, 1, 4)
+    elseif row.splash then t = 1 + row.splash
+    else t = 1 end
+    if v1 then return t end
+    t = math.max(1, t)
+    -- chain: the hit jumps on to up to N more enemies (Grave Hand chain 6); later jumps often find nobody
+    if row.chain then t = math.max(t, 1 + (math.min(row.chain, 6) - 1) * 0.6) end
+    -- count: N projectiles per attack (Prism Volley 3, Ice Wizard's 3 icicles on the strongest), each a full hit
+    if row.count then t = t * math.min(row.count, 6) end
+    return t
+end
+function MT.rowDps(row, m, v1)
+    local dmg = (row.dmg or 0) * m.dmg
+    local cd = math.max(0.1, (row.cd or 1) / m.speed)
+    local tg = MT.targets(row, v1)
+    local dps = dmg * tg / cd
+    -- crowd control buys every other hero more time on target
+    -- knockback (back = studs pushed back up the road) buys time like a stun: ~10 studs ≈ 1 s of walking
+    local hold = (row.stun or 0) + (v1 and 0 or (row.back or 0) / 10)
+    local cc = 1 + 0.12 * hold / cd * 3 + (row.statues and 0.15 or 0)
+    -- a slowed enemy stays in range longer: measured x1.68 on the slowing hero's own damage
+    if row.slow then cc = v1 and (cc + 0.1) or (cc * 1.68) end
+    dps = dps * cc
+    -- burn sticks to every enemy the hit lands on
+    if row.burn then dps = dps + row.burn * m.dmg * (row.burnT or 1) / cd * (v1 and 1 or tg) end
+    if row.lemon or row.summon or row.guards then dps = dps * 1.3 end
+    return dps
+end
+-- learning saved before the fit compared real damage with the v1 prediction. Rescale each attack (and the
+-- hero) by v1/new for that attack's rows, once, so the fix isn't counted twice (MT.learnPaths runs it)
+function MT.rescaleLearning()
+    if (tonumber(B.modelV) or 1) >= 2 then return end
+    local m = { dmg = 1, speed = 1 }
+    for kind, k in pairs(B.kinds) do
+        local L = MT.levels(kind)
+        if L and L[1] then
+            local sumN, sumR = 0, 0
+            for att, a in pairs(type(k.att) == "table" and k.att or {}) do
+                local old, new = 0, 0
+                for _, row in ipairs(L) do
+                    if row.attack == att then old = old + MT.rowDps(row, m, true); new = new + MT.rowDps(row, m) end
+                end
+                if old > 0 and new > 0 then
+                    local r = old / new
+                    a.eff = (a.eff or 1) * r
+                    sumN, sumR = sumN + (a.n or 1), sumR + (a.n or 1) * r
+                end
+            end
+            if sumN > 0 then k.eff = (k.eff or 1) * sumR / sumN end
+        end
+    end
+    B.modelV = 2
+    SF.log(1, "LEARN", "rescaled measured damage to the new damage formula")
+    SF.saveSoon()
+end
+-- each hero's upgrade-path factor (see C.M.pathFactor): 60% the last row, 40% row 3 (late waves are won
+-- by the top rows), over the level-1 single-target hit. Ratios within one LEVELS table, so the game's
+-- in-place scaling (your level/trait, ×2.6 for unowned) cancels out
+function MT.learnPaths()
+    local P, list = {}, {}
+    local m = { dmg = 1, speed = 1 }
+    for kind in pairs(C.Catalog.UNITS) do
+        local L = MT.levels(kind)
+        if L and L[1] and (L[1].dmg or 0) > 0 then
+            local single = L[1].dmg / math.max(0.1, L[1].cd or 1)
+            local f = (0.6 * MT.rowDps(L[#L], m) + 0.4 * MT.rowDps(L[math.min(3, #L)], m)) / single
+            if f > 0 and f < math.huge then P[kind] = f; table.insert(list, f) end
+        end
+    end
+    if #list < 5 then return end
+    table.sort(list)
+    P._median = list[math.ceil(#list / 2)]
+    B.paths = P
+    pcall(MT.rescaleLearning)
+    SF.saveSoon()
+end
+function MT.cost(kind, lvl)
+    local L = MT.levels(kind)
+    local row = L and L[lvl]
+    if not row then return nil end
+    return math.floor((row.cost or 0) * MT.mults(kind).cost + 0.5)
+end
+-- road coverage of a spot: path samples within range. Earlier samples weigh more (enemies die sooner →
+-- waves clear faster → maps finish faster). Road past where enemies actually get to (MT.reachCut, learned
+-- from live enemy positions) counts only a little: a hero there never gets a target.
+-- placement styles (the same as the battle sim's SIM.STRATS): weight of a road sample by how far down the
+-- road it is (f = 0 entrance … 1 exit). The tournament uses the one its planner scored best
+C.STRATS = {
+    front = function(f) return 1.35 - 0.6 * f end,
+    even = function(f) return 1 end,
+    entrance = function(f) return f < 0.35 and 1.5 or 0.25 end,
+    middle = function(f) return (f > 0.25 and f < 0.65) and 1.5 or 0.4 end,
+    exit = function(f) return 0.4 + 1.2 * f end,
+}
+C.STRAT_ORDER = { "front", "entrance", "middle", "even", "exit" }
+-- "crowd": the planner's measured enemy-HP share per stretch of road (same weights as SIM.crowdWeight)
+function MT.crowdStyle(occ)
+    MT.crowdFns = MT.crowdFns or {}
+    if MT.crowdFns[occ] then return MT.crowdFns[occ] end
+    local fn = function(f)
+        local i = U.clamp(math.floor(f * #occ) + 1, 1, #occ)
+        return 0.2 + 1.3 * (tonumber(occ[i]) or 0)
+    end
+    MT.crowdFns[occ] = fn
+    return fn
+end
+function MT.coverageAt(x, z, range, cut)
+    local pts = MT.pathPts
+    local n = #pts
+    local r2 = range * range
+    cut = cut or MT.reachCut or 1
+    local s = 0
+    local ts = MT.tourney and B.tourneySim
+    local style = ts and ts.week == tostring(MT.tourneyWeek and MT.tourneyWeek.n or "") and (C.STRATS[ts.strat or ""] or (ts.strat == "crowd" and type(ts.occ) == "table" and #ts.occ > 0 and MT.crowdStyle(ts.occ))) or nil
+    -- a normal map with a trusted clear plan places the plan's way
+    if not MT.tourney and MT.planStrat then style = C.STRATS[MT.planStrat] end
+    for i = 1, n do
+        local p = pts[i]
+        local dx, dz = p.X - x, p.Z - z
+        if dx * dx + dz * dz <= r2 then
+            local f = i / n
+            local w = 1.35 - 0.6 * f
+            -- raid: stack the entrance (battle sim: fastest final clear at the same safety margin)
+            if MT.raid and CFG.raidPlace == "entrance" then w = f < 0.35 and 1.5 or 0.25 end
+            if style then w = style(f) end
+            if f > cut then w = w * 0.2 end
+            s = s + w
+        end
+    end
+    return s
+end
+function MT.covRef(range) return math.max(1, 2 * range / MT.pathStep) end
+function MT.findMap()
+    for _, v in ipairs(getgc(true)) do
+        if type(v) == "table" and rawget(v, "layout") and rawget(v, "root") then
+            local mt = getmetatable(v)
+            if mt and type(rawget(mt, "canPlace")) == "function" and type(v.layout) == "table" and v.layout.designPath
+                and typeof(v.root) == "Instance" and v.root.Parent ~= nil then return v end
+        end
+    end
+end
+function MT.initMap()
+    MT.badSpots = {} -- refused spots belong to one map
+    task.spawn(function() pcall(MT.learnPaths) end)
+    MT.ToonKit = require(C.root:WaitForChild("ToonKit"))
+    for _ = 1, 40 do
+        MT.map = MT.findMap()
+        if MT.map then break end
+        task.wait(0.5)
+    end
+    if not MT.map then SF.log(0, "BATTLE", "map object not found — placement disabled"); return false end
+    -- spots this map refused ("in the way") in 2+ separate runs are skipped from the start
+    MT.mapName = tostring(MT.map.root and MT.map.root.Name or "?")
+    MT.badCounted = {}
+    for key, n in pairs(B.blocked[MT.mapName] or {}) do
+        local x, z = key:match("^(-?%d+),(-?%d+)$")
+        if x and n >= 2 then table.insert(MT.badSpots, { x = tonumber(x), z = tonumber(z) }) end
+    end
+    local path = MT.map.layout.designPath
+    MT.pathPts = path.pts
+    MT.pathStep = path.step
+    -- candidate spots: every grid point the game's own canPlace accepts (ignoring units), near the road
+    local W = MT.W()
+    local b = MT.map.layout.bounds or (C.root:FindFirstChild("MatchPath") and require(C.root.MatchPath).BOUNDS) or { minX = -165, maxX = 150, minZ = -100, maxZ = 100 }
+    MT.spots = {}
+    local step = CFG.gridStep
+    local count = 0
+    for x = b.minX + 4, b.maxX - 4, step do
+        for z = b.minZ + 4, b.maxZ - 4, step do
+            local p = Vector3.new(x, 0.25, z)
+            if path:distanceTo(p) <= 48 then
+                local ok = MT.map:canPlace(p * W, {})
+                if ok then table.insert(MT.spots, { x = x, z = z }) end
+            end
+            count = count + 1
+            if count % 1500 == 0 then task.wait() end
+        end
+    end
+    SF.log(1, "BATTLE", string.format("map %s: %d spots, path %.0f", tostring(MT.map.root and MT.map.root.Name), #MT.spots, path.length))
+    return true
+end
+function MT.covTable(range)
+    local cut = math.floor((MT.reachCut or 1) * 10 + 0.5) / 10
+    local key = math.floor(range + 0.5) .. ":" .. cut
+    if MT.cov[key] then return MT.cov[key] end
+    local t = {}
+    for i, s in ipairs(MT.spots) do
+        t[i] = MT.coverageAt(s.x, s.z, math.floor(range + 0.5), cut)
+        if i % 400 == 0 then task.wait() end
+    end
+    local order = {}
+    for i = 1, #t do order[i] = i end
+    table.sort(order, function(a, b) return t[a] > t[b] end)
+    t.order = order
+    MT.cov[key] = t
+    return t
+end
+function MT.towerList()
+    local W = MT.W()
+    local list = {}
+    for _, t in pairs(MT.towers) do table.insert(list, { pos = Vector3.new(t.x, 0.25 * W, t.z) }) end
+    return list
+end
+-- kinds of my heroes within the passive radius of a design-space point (optionally skipping one tower)
+function MT.kindsNear(x, z, skipId)
+    local W, r = MT.W(), (C.Catalog.PASSIVE_RADIUS or 16)
+    local kinds = {}
+    for id, t in pairs(MT.towers) do
+        if id ~= skipId and MT.mine(t) and (t.x / W - x) ^ 2 + (t.z / W - z) ^ 2 <= r * r then kinds[t.kind] = true end
+    end
+    return kinds
+end
+-- extra damage a new `kind` at (x,z) switches on in partners already standing there
+function MT.partnerBonus(kind, x, z)
+    if not CFG.passives then return 0 end
+    local W, r = MT.W(), (C.Catalog.PASSIVE_RADIUS or 16)
+    local add, me = 0, { [kind] = true }
+    for id, t in pairs(MT.towers) do
+        if MT.mine(t) and (t.x / W - x) ^ 2 + (t.z / W - z) ^ 2 <= r * r then
+            local before = C.M.passiveMult(t.kind, MT.kindsNear(t.x / W, t.z / W, id))
+            if before <= 1 then
+                local after = C.M.passiveMult(t.kind, me)
+                if after > 1 then add = add + MT.towerDps(t, t.level) * (after - 1) end
+            end
+        end
+    end
+    return add
+end
+-- best legal spot: road coverage, plus (for heroes with a pair passive) how much a spot next to partners adds
+function MT.bestSpot(range, kind, baseDps)
+    local covT = MT.covTable(range)
+    local W = MT.W()
+    local towers = MT.towerList()
+    local order = covT.order
+    local hasPassive = CFG.passives and kind and C.M.passive(kind) ~= nil
+    local best, bestCov, bestV, bestExtra, valid = nil, 0, -1, 0, 0
+    for n = 1, math.min(#order, 600) do
+        local i = order[n]
+        local s = MT.spots[i]
+        if covT[i] <= 0 then break end
+        -- spots the server refused this match ("Something is in the way": an obstacle our map check
+        -- doesn't see, or a bigger hero) are skipped, along with anything right next to them
+        local bad = false
+        for _, b in ipairs(MT.badSpots or {}) do
+            if (b.x - s.x) ^ 2 + (b.z - s.z) ^ 2 <= 16 then bad = true break end
+        end
+        local ok = not bad and MT.map:canPlace(Vector3.new(s.x, 0.25, s.z) * W, towers)
+        if ok then
+            valid = valid + 1
+            if not hasPassive then return s, covT[i], 0 end
+            local pm = C.M.passiveMult(kind, MT.kindsNear(s.x, s.z))
+            local extra = MT.partnerBonus(kind, s.x, s.z)
+            local v = (baseDps or 1) * covT[i] / MT.covRef(range) * pm + extra
+            if v > bestV then best, bestCov, bestV, bestExtra = s, covT[i] * pm, v, extra end
+            if valid >= 40 then break end
+        end
+    end
+    return best, bestCov, bestExtra
+end
+function MT.mine(t) return t.owner == LP.UserId end
+function MT.countKind(kind)
+    local n = 0
+    for _, t in pairs(MT.towers) do if MT.mine(t) and t.kind == kind then n = n + 1 end end
+    return n
+end
+function MT.towerDps(t, lvl)
+    local L = MT.levels(t.kind)
+    local row = L and L[lvl or t.level]
+    if not row then return 0, 0 end
+    local m = MT.mults(t.kind)
+    local range = (row.range or 20) * m.range
+    local cov = MT.coverageAt(t.x / MT.W(), t.z / MT.W(), range) / MT.covRef(range)
+    local pm = CFG.passives and C.M.passiveMult(t.kind, MT.kindsNear(t.x / MT.W(), t.z / MT.W(), t.id)) or 1
+    return MT.rowDps(row, m) * cov * pm, range
+end
+
+-- the economy: every option's damage gain per coin, then buy the best one (or save for it)
+function MT.options()
+    local opts = {}
+    local info = MT.info or {}
+    if CFG.place then
+        for _, kind in ipairs(info.slots or {}) do
+            if kind ~= "" and MT.levels(kind) and not (MT.blockedKind[kind] and U.now() < MT.blockedKind[kind]) and MT.countKind(kind) < C.Catalog.placeCap(kind) then
+                local L = MT.levels(kind)
+                local m = MT.mults(kind)
+                local range = (L[1].range or 20) * m.range
+                local eff = C.M.kindEff(kind, L[1].attack)
+                local spot, cov, extra = MT.bestSpot(range, kind, MT.rowDps(L[1], m) * eff)
+                if spot then
+                    local gain = MT.rowDps(L[1], m) * cov / MT.covRef(range) * eff + (extra or 0)
+                    local o = { kind = "place", unit = kind, spot = spot, cost = MT.cost(kind, 1), gain = gain, cov = cov / MT.covRef(range), extra = extra }
+                    -- lookahead: a hero whose L1 is weak but whose L2/L3 are the best buys in the game (Magic Man:
+                    -- 4.6 → 14 → 19 dps/$) must get placed to ever be upgraded — rate the placement by the best
+                    -- of placing + 0, 1 or 2 upgrades at this spot, per total coin
+                    local spent = o.cost
+                    for lv = 2, 3 do
+                        local row = L[lv]
+                        if not row then break end
+                        spent = spent + MT.cost(kind, lv)
+                        local r = (row.range or 20) * m.range
+                        local c = MT.coverageAt(spot.x, spot.z, r) / MT.covRef(r)
+                        local g = MT.rowDps(row, m) * c * C.M.kindEff(kind, row.attack) + (extra or 0)
+                        local ratio = g / math.max(1, spent)
+                        if ratio > (o.ratio2 or 0) then o.ratio2, o.ahead = ratio, lv end
+                    end
+                    table.insert(opts, o)
+                end
+            end
+        end
+    end
+    if CFG.upgrade then
+        for id, t in pairs(MT.towers) do
+            local L = MT.levels(t.kind)
+            if MT.mine(t) and L and L[t.level + 1] then
+                local now = MT.towerDps(t, t.level) * C.M.kindEff(t.kind, L[t.level] and L[t.level].attack)
+                local nxt = MT.towerDps(t, t.level + 1) * C.M.kindEff(t.kind, L[t.level + 1].attack)
+                local cost1 = MT.cost(t.kind, t.level + 1)
+                local gain = math.max(0, nxt - now)
+                -- two-level lookahead: some levels switch attack style and look weaker on paper while the
+                -- next one is a big jump — rate the step by the better of 1 or 2 levels per coin
+                local o = { kind = "upgrade", id = id, unit = t.kind, level = t.level + 1, cost = cost1, gain = gain }
+                if L[t.level + 2] then
+                    local nxt2 = MT.towerDps(t, t.level + 2) * C.M.kindEff(t.kind, L[t.level + 2].attack)
+                    local cost2 = cost1 + MT.cost(t.kind, t.level + 2)
+                    local g2 = math.max(0, nxt2 - now)
+                    if g2 / math.max(1, cost2) > gain / math.max(1, cost1) then o.ratio2 = g2 / math.max(1, cost2) end
+                end
+                table.insert(opts, o)
+            end
+        end
+    end
+    for _, o in ipairs(opts) do o.ratio = math.max(o.gain / math.max(1, o.cost or 1), o.ratio2 or 0) end
+    -- spread first: damage per coin can't see that one hero only hits so many enemies per second. A huge
+    -- single-target hitter (King Man + Oh My Glob) soaked the whole tournament budget to L5 while 3 heroes
+    -- stood on the road, and a swarm walked past. Until 4 different heroes are placed, deep upgrades
+    -- (to L3+) count half, so the road gets covered before one hero is maxed.
+    local kinds = {}
+    for _, t in pairs(MT.towers) do if MT.mine(t) then kinds[t.kind] = true end end
+    local placedKinds, teamKinds = U.count(kinds), 0
+    for _, k in ipairs(info.slots or {}) do if k ~= "" and MT.levels(k) then teamKinds = teamKinds + 1 end end
+    if placedKinds < math.min(4, teamKinds) then
+        for _, o in ipairs(opts) do
+            if o.kind == "upgrade" and (o.level or 0) >= 3 then o.ratio = o.ratio * 0.5; o.spread = true end
+        end
+    end
+    table.sort(opts, function(a, b) return a.ratio > b.ratio end)
+    return opts
+end
+function MT.economy()
+    if not (CFG.battle and MT.map) then return end
+    local opts = MT.options()
+    if #opts == 0 then return SF.status("Economy", "every unit placed and maxed") end
+    local best = opts[1]
+    local pick
+    if best.cost <= MT.money then pick = best
+    else
+        -- the best option is not affordable: buy the best affordable one only if it is nearly as good
+        -- (or lives are dropping and damage is needed now), otherwise save
+        local urgent = MT.leaked and (U.now() - MT.leaked) < 15
+        for _, o in ipairs(opts) do
+            -- a cheap buy barely delays an expensive one: placing a $200 hero while saving $3000 for an
+            -- upgrade costs a few seconds of income, so it only has to be reasonably good, not near-best
+            local cheap = o.cost <= best.cost * 0.2 and o.ratio >= best.ratio * 0.4
+            if o.cost <= MT.money and (urgent or cheap or o.ratio >= best.ratio * CFG.saveRatio) then pick = o break end
+        end
+    end
+    if not pick then
+        if U.now() - (MT.lastSellAt or 0) > 5 and MT.sellIdle(best) then MT.lastSellAt = U.now(); return end
+        return SF.status("Economy", string.format("saving $%d/%d for %s %s (%.2f dps/$)", MT.money, best.cost, best.kind, best.unit, best.ratio))
+    end
+    if pick.kind == "place" then
+        local W = MT.W()
+        local res, err = SF.request("Act:place:" .. pick.unit, C.R("Act"), "place", pick.unit, pick.spot.x * W, pick.spot.z * W)
+        if type(res) == "table" and res.ok then
+            MT.money = MT.money - pick.cost
+            MT.towers[res.id or ("p" .. os.clock())] = MT.towers[res.id] or { id = res.id, owner = LP.UserId, kind = pick.unit, level = 1, x = pick.spot.x * W, z = pick.spot.z * W, spent = pick.cost }
+            local msg = string.format("placed %s at (%d,%d) coverage %.2f%s · $%d (%.2f dps/$%s)", pick.unit, pick.spot.x, pick.spot.z, pick.cov,
+                (pick.extra or 0) > 0 and string.format(" +%.0f dps from partners", pick.extra) or "", pick.cost, pick.ratio,
+                (pick.ratio2 and pick.ratio2 >= pick.gain / math.max(1, pick.cost)) and (" counting L" .. tostring(pick.ahead)) or "")
+            SF.log(1, "PLACE", msg)
+            SF.status("Placement", msg)
+        elseif tostring(err):find("in the way") then
+            -- the spot is blocked: remember it and try the next best spot right away
+            MT.badSpots = MT.badSpots or {}
+            table.insert(MT.badSpots, { x = pick.spot.x, z = pick.spot.z })
+            -- remember it for this map (counted once per run; skipped for good from the second run on)
+            local key = string.format("%d,%d", pick.spot.x, pick.spot.z)
+            local m = MT.mapName and B.blocked
+            if m and not (MT.badCounted or {})[key] then
+                MT.badCounted = MT.badCounted or {}
+                MT.badCounted[key] = true
+                m[MT.mapName] = m[MT.mapName] or {}
+                local list = m[MT.mapName]
+                list[key] = (list[key] or 0) + 1
+                if U.count(list) > 40 then list[next(list)] = nil end
+                SF.saveSoon()
+            end
+            SF.req.back["Act:place:" .. pick.unit] = nil
+            SF.log(1, "PLACE", string.format("%s refused at (%d,%d): %s — trying another spot", pick.unit, pick.spot.x, pick.spot.z, tostring(err)))
+        else
+            MT.blockedKind[pick.unit] = U.now() + 20
+            SF.log(1, "PLACE", pick.unit .. " refused: " .. tostring(err))
+            SF.status("Placement", pick.unit .. " refused: " .. tostring(err))
+        end
+    else
+        local res, err = SF.request("Act:upgrade:" .. tostring(pick.id), C.R("Act"), "upgrade", pick.id)
+        if type(res) == "table" and res.ok then
+            MT.money = MT.money - pick.cost
+            local t = MT.towers[pick.id]
+            if t then t.level = pick.level end
+            local msg = string.format("upgraded %s #%s → L%d · $%d (%.2f dps/$)", pick.unit, tostring(pick.id), pick.level, pick.cost, pick.ratio)
+            SF.log(1, "UPGRADE", msg)
+            SF.status("Upgrade", msg)
+        else
+            SF.status("Upgrade", "refused: " .. tostring(err))
+        end
+    end
+end
+
+-- abilities: fire every unlocked ability while enemies are on the road
+-- abilities (Catalog.ABILITIES) all work on enemies inside the hero's range for a few seconds, so a press
+-- is worth most with a crowd or a boss in range: Decorpsinator turns kills into zombies (max 6), Soul Tax
+-- doubles kill money, Rent Day charges $25 per enemy ($250 a boss, $500 cap), Encore hastes nearby heroes.
+-- Hold a ready ability for that moment, but never past CFG.abilityHold seconds while enemies are in range.
+MT.ABILITY_CROWD = { serum = 5, soultax = 6, rentday = 10, mlEncore = 4 }
+function MT.abilities()
+    if not CFG.abilities or (MT.alive or MT.enemies) <= 0 then return end
+    MT.abilityReady = MT.abilityReady or {}
+    local list = MT.enemyList or {}
+    local W, now = MT.W(), U.now()
+    for id, t in pairs(MT.towers) do
+        if MT.mine(t) then
+            local ab = C.Catalog.abilityOf and C.Catalog.abilityOf(t.kind)
+            if ab and t.level >= (ab.unlock or 3) and now >= (MT.abilityAt[id] or 0) then
+                MT.abilityReady[id] = MT.abilityReady[id] or now
+                local L = MT.levels(t.kind)
+                local row = L and L[t.level]
+                local r = row and (row.range or 20) * MT.mults(t.kind).range or 20
+                local r2, tx, tz, cnt, boss = r * r, t.x / W, t.z / W, 0, false
+                for _, e in ipairs(list) do
+                    if (e.x - tx) ^ 2 + (e.z - tz) ^ 2 <= r2 then cnt = cnt + 1; boss = boss or e.boss end
+                end
+                local need = MT.ABILITY_CROWD[ab.id] or 4
+                local held = now - MT.abilityReady[id]
+                local why = boss and "boss in range" or (cnt >= need and (cnt .. " enemies in range"))
+                    or (cnt > 0 and held >= CFG.abilityHold and ("held " .. math.floor(held) .. "s"))
+                if not CFG.abilityTiming then why = cnt > 0 and "ready" or nil end
+                if why then
+                    local res = SF.request("Act:ability:" .. id, C.R("Act"), "ability", id)
+                    if type(res) == "table" and res.ok then
+                        MT.abilityAt[id] = now + (ab.cooldown or ab.cd or 20)
+                        MT.abilityReady[id] = nil
+                        SF.log(1, "ABILITY", string.format("%s %s (%s)", t.kind, tostring(ab.name or "ability"), why))
+                        SF.status("Abilities", string.format("%s used %s · %s", t.kind, tostring(ab.name or "ability"), why))
+                    else
+                        MT.abilityAt[id] = now + 6
+                    end
+                else
+                    SF.status("Abilities", string.format("%s %s ready · waiting for %d+ enemies or a boss (%d in range)", t.kind, tostring(ab.name or "ability"), need, cnt))
+                end
+            end
+        end
+    end
+end
+
+function MT.modeKey()
+    local mode = B.pending or {}
+    if mode.stage ~= MT.stage then mode = { stage = MT.stage, challenge = MT.challenge, infinite = MT.infinite } end
+    if MT.tourney then mode = { tourney = true } elseif MT.portal then mode.portal = true end
+    return C.MODE.key(mode)
+end
+-- how far down the road enemies get (this run, or remembered for the stage) → where heroes are useful
+function MT.updateReachCut()
+    local rec = B.stages[MT.modeKey()] or {}
+    local seen = math.max(MT.runReach or 0, tonumber(rec.reach) or 0)
+    -- until a map has been won, late waves may push further than the early ones showed: keep a wide zone
+    local floor = (rec.wins or 0) > 0 and 0.35 or 0.65
+    MT.reachCut = seen > 0 and U.clamp(seen + 0.15, floor, 1) or 1
+end
+
+-- early wave calls: "start" during a wave sends the next one now. Call while the defense is well ahead
+-- (few enemies alive, none far down the road, no leaks this run). How aggressive is learned per stage:
+-- a leak after early calls makes it more careful, a clean win with early calls bolder.
+function MT.callWave(now)
+    if not (CFG.earlyCall and MT.running) or MT.over or MT.infinite then return end
+    if MT.waves and MT.wave >= MT.waves then return end
+    if MT.runLeaks > 0 or now - (MT.waveStartAt or 0) < 4 or now - (MT.lastCallAt or 0) < 4 then return end
+    if not MT.enemyFolder then return end
+    local st = C.Catalog.stage(MT.stage)
+    local maxLives = st and math.floor((st.lives or 20) * ((MT.mods and MT.mods.lives) or 1)) or 0
+    if (tonumber(MT.lives) or 0) < maxLives then return end -- any life lost: play it safe for the rest of the run
+    -- the current wave must be (nearly) fully on the road first, or calls would stack half-spawned waves
+    if MT.waveExpect and (MT.waveSpawned or 0) < MT.waveExpect * 0.9 then return end
+    local alive, reach = MT.alive or MT.enemies, MT.reachNow or 1
+    if alive <= CFG.callAlive * MT.aggr and reach <= CFG.callReach * MT.aggr then
+        local res = SF.request("Act:call", C.R("Act"), "start")
+        MT.lastCallAt = now
+        if type(res) == "table" and res.ok then
+            MT.earlyCalls = MT.earlyCalls + 1
+            SF.status("Waves", string.format("called wave %d early (%d alive, front %.0f%% down the road, boldness x%.2f)", MT.wave + 1, alive, reach * 100, MT.aggr))
+            SF.log(2, "WAVES", string.format("early call → wave %d (%d alive, reach %.2f)", MT.wave + 1, alive, reach))
+        end
+    end
+end
+function MT.learnAggr(event)
+    local key = MT.modeKey()
+    local rec = B.stages[key] or { runs = 0, wins = 0 }
+    local a = tonumber(rec.aggr) or 1
+    if event == "leak" and MT.earlyCalls > 0 then a = a * 0.7
+    elseif event == "lost" then a = a * 0.6
+    elseif event == "clean" and MT.earlyCalls > 0 then a = a * 1.1 end
+    rec.aggr = U.clamp(a, 0.25, 1.8)
+    B.stages[key] = rec
+    MT.aggr = rec.aggr
+end
+
+-- targeting: slow, heavy attacks go to the strongest enemy (bosses), fast ones to the first
+function MT.retarget()
+    if not CFG.smartTarget then return end
+    for id, t in pairs(MT.towers) do
+        if MT.mine(t) then
+            local L = MT.levels(t.kind)
+            local row = L and L[t.level]
+            if row then
+                local want = ((row.cd or 1) >= 2.2 and not row.aoe) and "strongest" or "first"
+                if t.targeting ~= want then
+                    local res = SF.request("Act:target:" .. tostring(id), C.R("Act"), "target", id, want)
+                    if type(res) == "table" and res.ok then
+                        t.targeting = want
+                        SF.log(2, "TARGET", t.kind .. " #" .. tostring(id) .. " → " .. want)
+                    else
+                        t.targeting = want -- don't retry every tick
+                    end
+                end
+            end
+        end
+    end
+end
+
+-- selling: a hero that hasn't had a target for 3+ waves (it stands past where enemies die) is sold to pay
+-- for the best option now, only while the run is clean and not in the last third of the waves
+function MT.sellIdle(best)
+    if not (CFG.sellIdle and best) or best.cost <= MT.money or MT.runLeaks > 0 then return false end
+    if MT.waves and MT.wave > MT.waves * 0.66 then return false end
+    local idle = {}
+    for id, t in pairs(MT.towers) do
+        if MT.mine(t) and (MT.idleWaves[id] or 0) >= 3 and id ~= best.id then table.insert(idle, t) end
+    end
+    if #idle == 0 then return false end
+    table.sort(idle, function(a, b) return (a.spent or 0) < (b.spent or 0) end)
+    local refund = MT.refundRate or 0.5
+    local money, sell = MT.money, {}
+    for _, t in ipairs(idle) do
+        if money >= best.cost then break end
+        money = money + (t.spent or 0) * refund
+        table.insert(sell, t)
+    end
+    if money < best.cost then return false end
+    for _, t in ipairs(sell) do
+        local before = MT.money
+        local res = SF.request("Act:sell:" .. tostring(t.id), C.R("Act"), "sell", t.id)
+        if type(res) == "table" and res.ok then
+            SF.log(1, "SELL", string.format("sold idle %s #%s (no target for %d waves) for %s %s", t.kind, tostring(t.id), MT.idleWaves[t.id] or 0, best.kind, best.unit))
+            MT.towers[t.id] = nil
+            MT.idleWaves[t.id] = nil
+            task.delay(1, function()
+                if (t.spent or 0) > 0 and MT.money > before then MT.refundRate = U.clamp((MT.money - before) / t.spent, 0.1, 1) end
+            end)
+        end
+    end
+    return true
+end
+
+-- live enemies: the game's enemy models (workspace.CandyTD.Enemies), with how far down the road each is
+function MT.scanEnemies()
+    local f = MT.enemyFolder
+    if not (f and f.Parent) then
+        local root = workspace:FindFirstChild("CandyTD")
+        f = root and root:FindFirstChild("Enemies")
+        MT.enemyFolder = f
+    end
+    local list = {}
+    local pts = MT.pathPts
+    if not (f and pts) then MT.enemyList, MT.alive, MT.reachNow = list, 0, 0 return list end
+    -- enemy models are named after their type's display name; the game marks bosses in Enemies.TYPES
+    if not MT.bossNames then
+        MT.bossNames = {}
+        local okE, E = pcall(function() return require(C.root:FindFirstChild("Enemies")) end)
+        for k, v in pairs(okE and type(E) == "table" and E.TYPES or {}) do
+            if type(v) == "table" and v.boss then MT.bossNames[v.name or k] = true; MT.bossNames[k] = true end
+        end
+    end
+    local W, n, reach = MT.W(), #pts, 0
+    for _, m in ipairs(f:GetChildren()) do
+        local ok, cf = pcall(m.GetPivot, m)
+        if ok then
+            local x, z = cf.Position.X / W, cf.Position.Z / W
+            local bi, bd = 1, math.huge
+            for i = 1, n, 2 do
+                local p = pts[i]
+                local d = (p.X - x) ^ 2 + (p.Z - z) ^ 2
+                if d < bd then bd, bi = d, i end
+            end
+            local fr = bi / n
+            if fr > reach then reach = fr end
+            list[#list + 1] = { x = x, z = z, f = fr, boss = MT.bossNames[m.Name] == true }
+        end
+    end
+    MT.enemyList, MT.alive, MT.reachNow = list, #list, reach
+    if reach > (MT.waveReach or 0) then MT.waveReach = reach end
+    return list
+end
+
+-- game speed: the server paces each map toward a target run length (Catalog.WAVE_CLOCK, 0.8×–3×), so long
+-- maps (Ice Kingdom ~×1.8) run faster than their tables say while Infinite runs ~×1.1. Measured here as
+-- how fast enemies really walk, away from every hero (no slows or stuns), against their listed speed
+-- (× the challenge's Speedy); the finished run stores it per mode (rec.pace) and the planners divide the
+-- sim's times by it
+-- a wave's listed spawn time (its last group's delay + count gaps), from the stage or Infinite tables
+function MT.waveSpan(w)
+    w = tonumber(w)
+    if not w or w < 1 then return nil end
+    local groups
+    if MT.infinite then
+        local wo = C.Catalog.worldOf(MT.stage)
+        groups = wo and C.Catalog.infiniteWave(wo.id, w)
+    else
+        local st = C.Catalog.stage(MT.stage)
+        groups = st and C.Catalog.stageWaves(st)[w]
+    end
+    if type(groups) ~= "table" then return nil end
+    local s = 0
+    for _, g in ipairs(groups) do s = math.max(s, (tonumber(g[4]) or 0) + ((tonumber(g[2]) or 1) - 1) * (tonumber(g[3]) or 1)) end
+    return s
+end
+function MT.paceSample(now)
+    if now - (MT.paceAt or 0) < 1.5 then return end
+    local f, pts = MT.enemyFolder, MT.pathPts
+    if not (f and f.Parent and pts) then return end
+    if not MT.typeSpeed then
+        MT.typeSpeed = {}
+        local okE, E = pcall(function() return require(C.root:FindFirstChild("Enemies")) end)
+        for k, v in pairs(okE and type(E) == "table" and E.TYPES or {}) do
+            if type(v) == "table" and tonumber(v.speed) then MT.typeSpeed[v.name or k] = v.speed; MT.typeSpeed[k] = v.speed end
+        end
+    end
+    local W, step, n = MT.W(), MT.pathStep or 3, #pts
+    local tw = {}
+    for _, t in pairs(MT.towers) do tw[#tw + 1] = { x = t.x / W, z = t.z / W } end
+    local function where(m, hint)
+        local ok, cf = pcall(m.GetPivot, m)
+        if not ok then return nil end
+        local x, z = cf.Position.X / W, cf.Position.Z / W
+        for _, t in ipairs(tw) do if (t.x - x) ^ 2 + (t.z - z) ^ 2 < 55 * 55 then return nil end end
+        local lo, hi = hint and math.max(1, hint - 10) or 1, hint and math.min(n, hint + 20) or n
+        local bi, bd = nil, 36
+        for i = lo, hi do local p = pts[i]; local d = (p.X - x) ^ 2 + (p.Z - z) ^ 2; if d < bd then bd, bi = d, i end end
+        return bi
+    end
+    local last = MT.paceLast
+    if last then
+        local dt = now - MT.paceAt
+        for m, i0 in pairs(last) do
+            local listed = MT.typeSpeed[m.Name]
+            local i1 = m.Parent and listed and where(m, i0)
+            if i1 and i1 > i0 then
+                local r = (i1 - i0) * step / dt / (listed * ((MT.mods and MT.mods.speed) or 1))
+                if r > 0.3 and r < 4 then MT.paceSum, MT.paceN = (MT.paceSum or 0) + r, (MT.paceN or 0) + 1 end
+            end
+        end
+    end
+    local snap, cnt = {}, 0
+    for _, m in ipairs(f:GetChildren()) do
+        if cnt >= 12 then break end
+        local i = where(m)
+        if i then snap[m] = i; cnt = cnt + 1 end
+    end
+    MT.paceLast, MT.paceAt = snap, now
+end
+
+-- learning: each tower's measured damage vs the model's damage *while enemies were actually in its range*
+-- (exposure), so a hero standing behind the kill zone isn't blamed for having nothing to hit
+function MT.learnTick(dt)
+    local list = MT.enemyList
+    if not MT.running or not list or #list == 0 then return end
+    MT.waveT = MT.waveT + dt
+    local W = MT.W()
+    for id, t in pairs(MT.towers) do
+        if MT.mine(t) then
+            local L = MT.levels(t.kind)
+            local row = L and L[t.level]
+            if row then
+                local m = MT.mults(t.kind)
+                local r = (row.range or 20) * m.range
+                local r2, tx, tz, cnt = r * r, t.x / W, t.z / W, 0
+                for _, e in ipairs(list) do
+                    if (e.x - tx) ^ 2 + (e.z - tz) ^ 2 <= r2 then cnt = cnt + 1 end
+                end
+                if cnt > 0 then
+                    local tg = MT.targets(row)
+                    local pm = CFG.passives and C.M.passiveMult(t.kind, MT.kindsNear(tx, tz, id)) or 1
+                    MT.pred[id] = (MT.pred[id] or 0) + MT.rowDps(row, m) * pm / tg * math.min(cnt, tg) * dt
+                    MT.expo[id] = (MT.expo[id] or 0) + dt
+                end
+            end
+        end
+    end
+end
+function MT.learnCommit()
+    -- Compare shares, not totals: each tower's share of my damage vs its share of exposure-weighted
+    -- predicted damage. Leak waves (the whole road engaged) teach faster.
+    MT.learnRate = MT.leakWave and 0.3 or 0.12
+    -- heroes that never had a target this wave
+    for id, t in pairs(MT.towers) do
+        if MT.mine(t) then MT.idleWaves[id] = (MT.expo[id] or 0) > 0 and 0 or (MT.idleWaves[id] or 0) + 1 end
+    end
+    if (MT.waveReach or 0) > (MT.runReach or 0) then MT.runReach = MT.waveReach end
+    MT.waveReach = 0
+    MT.updateReachCut()
+    table.clear(MT.expo)
+    MT.waveT, MT.busyT, MT.leakWave = 0, 0, false
+    local sumA, sumP = 0, 0
+    for id, v in pairs(MT.atkDmg) do if MT.pred[id] then sumA = sumA + v end end
+    for id, v in pairs(MT.pred) do sumP = sumP + v end
+    if sumA <= 0 or sumP <= 0 then
+        table.clear(MT.atkDmg); table.clear(MT.pred); MT.dmgDelta = {}
+        return
+    end
+    for id, v in pairs(MT.atkDmg) do MT.dmgDelta[id] = v / sumA * sumP end
+    table.clear(MT.atkDmg)
+    local byKind, byAtt = {}, {}
+    for id, t in pairs(MT.towers) do
+        if MT.mine(t) and (MT.pred[id] or 0) > 50 then
+            local k = byKind[t.kind] or { m = 0, p = 0 }
+            k.m = k.m + (MT.dmgDelta[id] or 0)
+            k.p = k.p + MT.pred[id]
+            byKind[t.kind] = k
+            local L = MT.levels(t.kind)
+            local att = L and L[t.level] and L[t.level].attack
+            if att then
+                local key = t.kind .. "|" .. att
+                local a = byAtt[key] or { kind = t.kind, att = att, m = 0, p = 0 }
+                a.m = a.m + (MT.dmgDelta[id] or 0)
+                a.p = a.p + MT.pred[id]
+                byAtt[key] = a
+            end
+        end
+    end
+    local rate = MT.learnRate or 0.1
+    local function ema(rec, ratio)
+        -- the more waves a hero has, the less one wave moves it: a new hero learns in a few waves, a veteran
+        -- (500+ waves) averages over ~40-50, so one odd Infinite run or a new teammate can't flip its rating
+        local r = math.max(0.02, rate * math.sqrt(30 / (30 + (rec.n or 0))))
+        rec.eff = (rec.n or 0) == 0 and (1 + (ratio - 1) * 0.5) or (rec.eff * (1 - r) + ratio * r)
+        rec.n = (rec.n or 0) + 1
+    end
+    -- ratios only matter relative to each other (kindEff divides by the average), so no tight clamp
+    for kind, k in pairs(byKind) do
+        local rec = B.kinds[kind] or { eff = 1, n = 0 }
+        ema(rec, U.clamp(k.m / math.max(k.p, 1), 1e-4, 100))
+        B.kinds[kind] = rec
+    end
+    for _, a in pairs(byAtt) do
+        local rec = B.kinds[a.kind]
+        rec.att = type(rec.att) == "table" and rec.att or {}
+        local ar = rec.att[a.att] or { eff = 1, n = 0 }
+        ema(ar, U.clamp(a.m / math.max(a.p, 1), 1e-4, 100))
+        rec.att[a.att] = ar
+    end
+    table.clear(MT.pred)
+    MT.dmgDelta = {}
+    SF.saveSoon()
+end
+
+-- per-tower damage: heroes are simulated on the server, which sends `dmg` events with each changed
+-- tower's cumulative damage dealt (the game's own "towerDealt" panel uses the same numbers)
+function MT.onEvent(seq, name, d)
+    if type(d) ~= "table" then return end
+    if name == "money" then MT.money = tonumber(d.money) or MT.money
+    elseif name == "spawn" then MT.enemies = MT.enemies + 1; MT.waveSpawned = (MT.waveSpawned or 0) + 1
+    elseif name == "died" then MT.enemies = math.max(0, MT.enemies - 1)
+    elseif name == "leak" then MT.enemies = math.max(0, MT.enemies - 1); MT.leaked = U.now(); MT.leakWave = true; MT.lives = d.lives or (MT.lives - 1)
+        MT.runLeaks = MT.runLeaks + 1
+        if MT.runLeaks == 1 then MT.learnAggr("leak") end
+        SF.log(1, "BATTLE", string.format("leak! lives %s%s", tostring(MT.lives), MT.earlyCalls > 0 and (" · early calls off, boldness → x" .. string.format("%.2f", MT.aggr)) or ""))
+    elseif name == "wave" then
+        MT.wave = d.wave or MT.wave; MT.running = true; MT.waveStartAt = U.now(); MT.waveSpawned = 0
+        -- expected enemies this wave from the stage's own wave list (× challenge swarm)
+        local st = C.Catalog.stage(MT.stage)
+        local groups = st and not MT.infinite and C.Catalog.stageWaves(st)[MT.wave]
+        if groups then
+            local n = 0
+            for _, g in ipairs(groups) do n = n + (tonumber(g[2]) or 1) end
+            MT.waveExpect = math.floor(n * ((MT.mods and MT.mods.count) or 1))
+        else MT.waveExpect = nil end
+    elseif name == "cleared" then MT.running = false; MT.enemies = 0; MT.learnCommit()
+    elseif name == "tower" then
+        MT.towers[d.id] = { id = d.id, owner = d.owner, kind = d.kind, level = d.level or 1, x = d.x, z = d.z, spent = d.spent, targeting = d.targeting }
+    elseif name == "upgraded" then
+        local t = MT.towers[d.id]; if t then t.level = d.level or t.level; t.spent = d.spent or t.spent end
+    elseif name == "sold" then MT.towers[d.id] = nil
+    elseif name == "dmg" then
+        -- t = [towerId, cumulative damage, ...] for towers that changed; p = per player totals
+        for i = 1, #(d.t or {}) - 1, 2 do
+            local id, total = d.t[i], tonumber(d.t[i + 1]) or 0
+            local prev = MT.dmg[id] or 0
+            if total > prev then MT.atkDmg[id] = (MT.atkDmg[id] or 0) + (total - prev) end
+            MT.dmg[id] = total
+        end
+        for i = 1, #(d.p or {}) - 1, 2 do if d.p[i] == LP.UserId then MT.teamDmg = tonumber(d.p[i + 1]) or MT.teamDmg end end
+    elseif name == "over" then
+        MT.over = true; MT.won = d.won == true; MT.wave = d.wave or MT.wave; MT.lives = d.lives or MT.lives
+        MT.learnCommit()
+        task.spawn(MT.finish)
+    elseif name == "result" then MT.result = d
+    elseif name == "reset" or name == "stage" then
+        task.delay(1, MT.resync)
+    end
+end
+function MT.resync()
+    local s = SF.request("Sync", C.R("Sync"))
+    if type(s) ~= "table" then return end
+    MT.money = s.money or MT.money
+    MT.wave = s.wave or 0
+    MT.waves = s.waves
+    MT.lives = s.lives or MT.lives
+    MT.running = s.running == true
+    MT.over = s.over == true
+    MT.stage = s.stage or MT.stage
+    -- the snapshot says infinite=false even in Infinite (seen Oct 2026): it can only confirm Infinite, never
+    -- undo what the match info / launch said (a match doesn't change mode)
+    if s.infinite == true then MT.infinite = true end
+    MT.enemies = #(s.enemies or {})
+    table.clear(MT.towers)
+    for _, t in ipairs(s.towers or {}) do
+        MT.towers[t.id] = { id = t.id, owner = t.owner, kind = t.kind, level = t.level or 1, x = t.x, z = t.z, spent = t.spent, targeting = t.targeting }
+    end
+    if s.dmg and type(s.dmg.t) == "table" then
+        for i = 1, #s.dmg.t - 1, 2 do MT.dmg[s.dmg.t[i]] = math.max(MT.dmg[s.dmg.t[i]] or 0, tonumber(s.dmg.t[i + 1]) or 0) end
+    end
+    if s.dmg and type(s.dmg.p) == "table" then
+        for i = 1, #s.dmg.p - 1, 2 do if s.dmg.p[i] == LP.UserId then MT.teamDmg = tonumber(s.dmg.p[i + 1]) or MT.teamDmg end end
+    end
+    if not MT.runStart or (MT.wave <= 1 and not MT.over) then MT.runStart = MT.runStart or os.time() end
+end
+
+-- per-run state (a fresh run starts here and after replay / next)
+function MT.resetRun()
+    MT.runLeaks, MT.earlyCalls, MT.runReach, MT.waveReach = 0, 0, 0, 0
+    MT.paceSum, MT.paceN, MT.paceLast, MT.paceAt = 0, 0, nil, 0
+    MT.cdSum, MT.cdN, MT.spanSum, MT.spanN, MT.cdDue, MT.cdStartAt, MT.spanRaw = 0, 0, 0, 0, nil, nil, {}
+    -- WaveNextAt: a wave's start sets a new due time; when it has finished spawning the same due time is set
+    -- again. So start → re-set = the wave's real spawn time (its listed spawn time / real = the game speed,
+    -- for maps where no enemy is ever away from the heroes), and what's left then = the real gap
+    if not MT.cdConn then
+        local mr = game:GetService("ReplicatedStorage"):FindFirstChild("MatchRemotes")
+        if mr then
+            MT.cdConn = mr:GetAttributeChangedSignal("WaveNextAt"):Connect(function()
+                local due = tonumber(mr:GetAttribute("WaveNextAt"))
+                local now = workspace:GetServerTimeNow()
+                if not due or due < now then return end
+                -- Infinite only sets it when a wave has finished spawning: every change is a gap
+                if MT.infinite then
+                    local left = due - now
+                    if left > 1 and left < 60 then MT.cdSum, MT.cdN = (MT.cdSum or 0) + left, (MT.cdN or 0) + 1 end
+                    return
+                end
+                if not MT.cdDue or math.abs(due - MT.cdDue) > 1 then
+                    MT.cdDue, MT.cdStartAt = due, now
+                    return
+                end
+                local left = due - now
+                if left > 1 and left < 60 then MT.cdSum, MT.cdN = (MT.cdSum or 0) + left, (MT.cdN or 0) + 1 end
+                local span = MT.cdStartAt and MT.waveSpan(MT.wave)
+                local real = MT.cdStartAt and now - MT.cdStartAt
+                MT.spanRaw = MT.spanRaw or {}
+                if #MT.spanRaw < 8 then table.insert(MT.spanRaw, string.format("%s/%s", span and string.format("%.0f", span) or "?", real and string.format("%.1f", real) or "?")) end
+                if span and span >= 5 and real and real > 0.5 and ((MT.mods and MT.mods.count) or 1) == 1 then
+                    local r = span / real
+                    if r > 0.3 and r < 8 then MT.spanSum, MT.spanN = (MT.spanSum or 0) + r, (MT.spanN or 0) + 1 end
+                end
+                MT.cdStartAt = nil
+            end)
+            table.insert(SF.conns, MT.cdConn)
+        end
+    end
+    table.clear(MT.idleWaves); table.clear(MT.expo); table.clear(MT.pred); table.clear(MT.atkDmg)
+    local rec = B.stages[MT.modeKey()] or {}
+    -- raid caution learned while the team was weak (losses → x0.36) kept early calls off for good. Once the
+    -- raid sim says the team wins with x2+ to spare, start over from x1 (once) and let clean wins re-learn it
+    if MT.raid and not B.raidAggrReset and (tonumber(rec.aggr) or 1) < 1 and B.raidSim and (tonumber(B.raidSim.margin) or 0) >= 2 then
+        SF.log(1, "WAVES", string.format("raid boldness x%.2f was learned with a weaker team; the sim's margin is x%.2f → starting over at x1",
+            tonumber(rec.aggr) or 1, B.raidSim.margin))
+        rec.aggr = 1
+        B.stages[MT.modeKey()] = rec
+        B.raidAggrReset = os.time()
+        SF.saveSoon()
+    end
+    MT.aggr = tonumber(rec.aggr) or 1
+    MT.updateReachCut()
+    table.clear(MT.cov)
+end
+-- a lobby trip costs ~25s (two teleports) against ~270s per map, so only go when it buys enough strength.
+-- When the next map looks shaky (a wall), strength is what's missing, so any gain is worth a trip.
+function MT.hubDue(pick)
+    local p = B.prof or {}
+    local gems = tonumber(p.gems) or 0
+    local items = p.items or {}
+    local evoRes = CFG.evolve and C.EVO.gemReserve(p) or 0
+    -- a wall = the next new map looks shaky; with no new maps left (story done) there's nothing to rush for
+    local wall = pick and pick.first and (pick.p or 1) < 0.7
+    if CFG.evolve then
+        for _, e in ipairs(C.EVO.list(p)) do if e.ready and e.gain > 0 then return "evolve " .. e.target end end
+    end
+    local pull = C.Catalog.summonCost(p, CFG.summonTen and 10 or 1)
+    local pulls = math.floor((gems - CFG.gemReserve - evoRes) / math.max(1, pull))
+    -- a full unit backpack can't take a pull: no trip for that
+    local okI, room = pcall(function() return C.Catalog.inventoryMax(p) - C.Catalog.unitCount(p) end)
+    if okI and room < (CFG.summonTen and 10 or 1) then pulls = 0 end
+    if pulls > 0 and not C.M.summonNew(p) then pulls = 0 end
+    if CFG.summon and pulls >= (wall and 1 or CFG.hubMinPulls) then return pulls .. " summons" .. (wall and " (wall ahead)" or "") end
+    if wall and CFG.feed and B.feedUseful ~= false and ((tonumber(items.candy) or 0) >= 4 or (tonumber(items.bigcandy) or 0) >= 1) then return "feed (wall ahead)" end
+    if B.sinceHub >= CFG.hubEvery then return "check-in every " .. CFG.hubEvery .. " runs (feed/rerolls)" end
+    return nil
+end
+
+-- end of a run: record it, then decide replay / next stage / back to the lobby
+function MT.finish()
+    if MT.finishing then return end
+    MT.finishing = true
+    -- wait just long enough for the result event (rewards) — at most 3s
+    for _ = 1, 12 do if MT.result then break end task.wait(0.25) end
+    local mode = B.pending or { stage = MT.stage }
+    if mode.stage ~= MT.stage then mode = { stage = MT.stage, challenge = MT.challenge, infinite = MT.infinite } end
+    if MT.tourney then mode = { stage = MT.stage, tourney = true } elseif MT.portal then mode.portal = true end
+    local key = C.MODE.key(mode)
+    local rec = B.stages[key] or { runs = 0, wins = 0 }
+    local sec = math.max(30, os.time() - (MT.runStart or os.time()))
+    rec.runs = (rec.runs or 0) + 1
+    if MT.won then rec.wins = (rec.wins or 0) + 1 end
+    -- a run the script joined mid-way (reload / late start) has no real duration: don't record it
+    if not MT.joinedMidRun then rec.sec = rec.sec and (rec.sec * 0.7 + sec * 0.3) or sec end
+    rec.lastWave = MT.wave
+    local stage = C.Catalog.stage(MT.stage)
+    rec.diff = stage and C.M.stageDifficulty(stage, mode.challenge and C.Catalog.challengeMods(C.Catalog.challenge(mode.challenge)) or nil) or rec.diff
+    rec.power = C.MODE.teamPower(B.prof)
+    if MT.won and stage then
+        local maxLives = (stage.lives or 20) * ((MT.mods and MT.mods.lives) or 1)
+        local frac = U.clamp((tonumber(MT.lives) or 0) / math.max(1, maxLives), 0, 1)
+        rec.livesFrac = rec.livesFrac and math.max(rec.livesFrac * 0.8, frac) or frac
+    end
+    -- game speed the server ran this map at (MT.paceSample)
+    if (MT.cdN or 0) >= 3 then
+        local cd = MT.cdSum / MT.cdN
+        rec.countdown = rec.countdown and (rec.countdown * 0.6 + cd * 0.4) or cd
+    end
+    -- game speed = enemies' walking speed against their listed speed. Spawn times run 1/stage.pace faster
+    -- (the stage's own spawn-gap factor, which the sim applies itself), so they're only logged as a check
+    local walkP = (MT.paceN or 0) >= 8 and MT.paceSum / MT.paceN or nil
+    local spanP = (MT.spanN or 0) >= 3 and MT.spanSum / MT.spanN or nil
+    local p = walkP
+    if p then rec.pace = rec.pace and (rec.pace * 0.6 + p * 0.4) or p end
+    if spanP then rec.spawnPace = spanP end
+    if p or (MT.cdN or 0) >= 3 then
+        SF.log(1, "PACE", string.format("%s: game speed x%s by walking (%d) · x%s by spawn times (%d; listed/real s %s) · gap after spawning %s s (%d) · stored x%s",
+            MT.stageName(), walkP and string.format("%.2f", walkP) or "?", MT.paceN or 0, spanP and string.format("%.2f", spanP) or "?", MT.spanN or 0,
+            table.concat(MT.spanRaw or {}, " "), (MT.cdN or 0) > 0 and string.format("%.1f", MT.cdSum / MT.cdN) or "?", MT.cdN or 0,
+            rec.pace and string.format("%.2f", rec.pace) or "?"))
+    end
+    -- where enemies got to (placement next time), and how bold early wave calls can be here
+    if (MT.runReach or 0) > 0 then rec.reach = math.max((tonumber(rec.reach) or 0) * 0.85, MT.runReach) end
+    B.stages[key] = rec
+    if not MT.won then MT.learnAggr("lost") elseif MT.runLeaks == 0 then MT.learnAggr("clean") end
+    -- bank the run's rewards into the cached profile (gems/items decide whether a lobby trip is worth it)
+    if type(MT.result) == "table" then
+        B.prof.gems = (tonumber(B.prof.gems) or 0) + (tonumber(MT.result.gems) or 0)
+        B.prof.items = type(B.prof.items) == "table" and B.prof.items or {}
+        for k, n in pairs(type(MT.result.items) == "table" and MT.result.items or {}) do
+            B.prof.items[k] = (tonumber(B.prof.items[k]) or 0) + (tonumber(n) or 0)
+        end
+    end
+    B.matches = B.matches + 1
+    B.sinceHub = B.sinceHub + 1
+    if MT.won then B.totals.wins = B.totals.wins + 1 else B.totals.losses = B.totals.losses + 1 end
+    -- keep the cached profile current so the next pick knows about the new clear
+    if MT.won and not mode.challenge and not mode.infinite and not mode.tourney then
+        B.prof.cleared = B.prof.cleared or {}
+        B.prof.cleared[tostring(MT.stage)] = (tonumber(B.prof.cleared[tostring(MT.stage)]) or 0) + 1
+    elseif MT.won and mode.challenge then
+        B.prof.chWins = type(B.prof.chWins) == "table" and B.prof.chWins or {}
+        B.prof.chWins[mode.challenge] = true
+    end
+    local resTxt = MT.result and U.json(MT.result):sub(1, 200) or ""
+    SF.log(1, "RESULT", string.format("%s %s wave %s in %ds (record %d/%d) · %d early calls · %d leaks · boldness x%.2f %s",
+        stage and stage.name or tostring(MT.stage), MT.won and "WON" or "lost", tostring(MT.wave), sec, rec.wins, rec.runs, MT.earlyCalls, MT.runLeaks, MT.aggr, resTxt))
+    SF.status("Match", string.format("%s %s · %d/%d wins here", stage and stage.name or "?", MT.won and "won" or "lost", rec.wins, rec.runs))
+    B.lastResult = { text = string.format("%s %s on wave %s in %d:%02d", stage and stage.name or "?", MT.won and "won" or "lost", tostring(MT.wave), sec // 60, sec % 60),
+        won = MT.won == true, items = type(MT.result) == "table" and MT.result.items or nil, gems = type(MT.result) == "table" and MT.result.gems or nil, at = os.time() }
+    -- clear plan: real runs judge it. Two runs with the plan slower than the old average → rejected
+    local plan = MT.planKey == key and B.clearPlan[key]
+    -- Infinite: a run ends at a death wave (real even after joining mid-run)
+    if MT.infinite and (tonumber(MT.wave) or 0) > 0 then
+        rec.infWave = rec.infWave and (rec.infWave * 0.7 + MT.wave * 0.3) or MT.wave
+        if plan then
+            plan.runs, plan.sum = (plan.runs or 0) + 1, (plan.sum or 0) + MT.wave
+            local avg = plan.sum / plan.runs
+            if plan.runs >= 2 and avg < (tonumber(plan.real) or avg) * 0.97 then plan.rejected = true end
+            SF.log(1, "PLAN", string.format("%s Infinite with the plan: wave %d (avg %.0f over %d runs, before ~%.0f, sim said %s)%s", MT.stageName(), MT.wave, avg, plan.runs,
+                tonumber(plan.real) or 0, tostring(plan.wave), plan.rejected and " → earlier than before, plan dropped" or ""))
+        end
+        plan = nil
+    end
+    if plan and MT.won and not MT.joinedMidRun then
+        plan.runs, plan.sum = (plan.runs or 0) + 1, (plan.sum or 0) + sec
+        local avg = plan.sum / plan.runs
+        if plan.runs >= 2 and avg > (tonumber(plan.real) or avg) * 1.03 then plan.rejected = true end
+        SF.log(1, "PLAN", string.format("%s with the plan: %ds (avg %ds over %d runs, before %ds, sim said %ds)%s", MT.stageName(), sec, math.floor(avg), plan.runs,
+            math.floor(tonumber(plan.real) or 0), math.floor(tonumber(plan.t) or 0), plan.rejected and " → slower than before, plan dropped" or ""))
+    end
+    -- tournament: the score (damage dealt) against what the planner predicted; the ratio calibrates it
+    if MT.tourney then
+        local score = tonumber(LP:GetAttribute("TourneyScore")) or 0
+        local last, ts = B.tourney or {}, B.tourneySim
+        local pred = tonumber(last.pred)
+        if score > 0 and pred and pred > 0 and not MT.joinedMidRun and ts then
+            local r = U.clamp(score / pred, 0.5, 2)
+            ts.cal = ts.cal and (ts.cal * 0.6 + r * 0.4) or r
+        end
+        MT.tourneyScore = score
+        SF.log(1, "TOURNEY", string.format("score %.1fM damage%s · wave %s · %d leaks", score / 1e6,
+            pred and string.format(" (planner predicted %.1fM with %s)", pred / 1e6, tostring(last.plan)) or "", tostring(MT.wave), MT.runLeaks or 0))
+    end
+    B.pending = nil
+    pcall(SF.HIVE.record, key, sec)
+    SF.saveNow()
+    if not CFG.master or not CFG.play then MT.finishing = false; return end
+    -- decide what's next
+    local pick = C.MODE.pick(B.prof)
+    local here = { stage = MT.stage, challenge = nil, infinite = MT.infinite, first = false }
+    local action = "home"
+    local why = "next mode needs the lobby"
+    if MT.raid then why = "raid done (keys and raids start from the lobby)" end
+    if MT.tourney then why = "tournament done" elseif MT.portal then why = "Lich Lair done (portals start from the lobby)" end
+    -- Dungeon Train challenges are relaunched through the hub every time. Act("again") can return ok while
+    -- losing the challenge id, which turns the next run into a normal stage. Returning to the Train is a
+    -- little slower but preserves the exact challenge id and lets challengesAt(os.time()) see refreshed cars.
+    if CFG.normalLoop and pick and pick.manual and not MT.infinite and not MT.raid and not MT.tourney and not MT.portal then
+        if tonumber(pick.stage) == tonumber(MT.stage) and not mode.challenge then
+            action = "again"
+            why = "Selected Stage Loop · replaying the same normal act"
+        else
+            action = "home"
+            why = "Selected Stage Loop · switching to the chosen World / Act"
+        end
+    elseif mode.challenge and not MT.infinite and not MT.raid and not MT.tourney and not MT.portal then
+        action = "home"
+        if pick and pick.challenge then
+            why = pick.challengeFirst
+                and ("Dungeon Train → next first-win car " .. tostring(pick.challengeSlot or "?"))
+                or ("Dungeon Train endless loop → car " .. tostring(pick.challengeSlot or "?"))
+        else
+            why = "Dungeon Train → refresh active cars"
+        end
+    elseif not CFG.normalLoop and pick and not pick.challenge and not pick.infinite and not pick.raid and not pick.portal and not pick.tourney
+        and not MT.infinite and not MT.raid and not MT.tourney and not MT.portal then
+        local nextSt = C.Catalog.nextStage(MT.stage)
+        local hubWhy = MT.hubDue(pick)
+        if hubWhy then why = hubWhy
+        else
+            if pick.stage == MT.stage and not mode.challenge then action = "again"
+            elseif MT.won and nextSt and pick.stage == nextSt.id then action = "next" end
+        end
+    end
+    SF.log(1, "MODE", "after run: " .. action .. (action == "home" and (" (" .. why .. ")") or "") .. " · ranking: " .. tostring(C.MODE.lastTop))
+    SF.status("Mode", action .. " → " .. C.MODE.describe(pick))
+    if action == "again" or action == "next" then
+        local res, err = SF.request("Act:" .. action, C.R("Act"), action)
+        if type(res) == "table" and res.ok then
+            B.pending = {
+                stage = action == "next" and pick.stage or MT.stage,
+                challenge = action == "again" and mode.challenge or pick.challenge,
+                infinite = pick.infinite, first = pick.first,
+                manual = pick.manual, manualWorld = pick.manualWorld, manualAct = pick.manualAct,
+                at = os.time(),
+            }
+            SF.saveNow()
+            MT.runStart = os.time()
+            MT.joinedMidRun = false
+            SF.req.back["Act:start"] = nil
+            MT.over = false; MT.won = nil; MT.result = nil
+            table.clear(MT.dmg); MT.dmgDelta = {}; table.clear(MT.abilityAt)
+            MT.resetRun()
+            task.wait(2)
+            MT.resync()
+            if action == "next" then table.clear(MT.cov); MT.initMap() end
+            MT.finishing = false
+            return
+        end
+        SF.log(1, "MODE", action .. " refused (" .. tostring(err) .. ") → home")
+    end
+    SF.flush()
+    SF.request("ReturnToHub", C.R("ReturnToHub"))
+    SF.status("Mode", "returning to the lobby")
+    task.delay(40, function() MT.finishing = false end)
+end
+
+-- raid gate: simulate the raid (CKD_SmartFarm/sim.lua, the game's own data). The sim also picks the raid
+-- team itself (single swaps from the 9 strongest owned heroes, kept while they raise the margin), so the
+-- gate scores the team the raid will really bring. Re-run when the roster changes or every 2h.
+-- what the raid gate last did, in plain words (GUI + the optional report): a player with keys and no
+-- raids needs this to tell "never ran" from "couldn't load" from "ran and said no"
+function MT.raidNote(text)
+    B.raidSimNote = { text = tostring(text):sub(1, 300), at = os.time() }
+    SF.saveSoon()
+end
+-- the battle simulator: the local CKD_SmartFarm/sim.lua, else (loadstring users) the copy in the repo.
+-- Returns ok, SIM (or the error), where it came from
+function MT.loadSim()
+    local from = "local file"
+    local ok, SIM = pcall(function()
+        local src = isfile(C.FOLDER .. "/sim.lua") and readfile(C.FOLDER .. "/sim.lua") or nil
+        if not src then from = "GitHub"; src = game:HttpGet(C.SIM_URL) end
+        local fn, cerr = loadstring(src, "=sim")
+        if not fn then error("compile: " .. tostring(cerr)) end
+        return fn()
+    end)
+    return ok and type(SIM) == "table", SIM, from
+end
+function MT.raidCheck()
+    local RAID = C.Catalog.RAID
+    if not (CFG.raids and RAID and C.Catalog.eventOn and C.Catalog.eventOn()) then
+        return MT.raidNote(not CFG.raids and "raids switched off" or "no raid event running")
+    end
+    -- best copy of each owned kind the sim can model, strongest 9
+    local bestOf = {}
+    for _, u in pairs(B.prof.units or {}) do
+        local sc = C.M.unitScore(u, true)
+        if MT.levels(u.kind) and (not bestOf[u.kind] or sc > bestOf[u.kind].s) then bestOf[u.kind] = { s = sc, u = u } end
+    end
+    local pool = {}
+    for k, b in pairs(bestOf) do table.insert(pool, { kind = k, s = b.s, u = b.u }) end
+    table.sort(pool, function(a, b) return a.s > b.s end)
+    while #pool > 9 do table.remove(pool) end
+    if #pool == 0 then
+        SF.log(1, "RAID", "simulator problem: no hero stat tables found in this match")
+        return MT.raidNote("no hero stat tables found in the match (nothing to simulate)")
+    end
+    local sigT = {}
+    for _, c in ipairs(pool) do table.insert(sigT, string.format("%s:%s:%s:%s", c.kind, tostring(c.u.level), tostring(c.u.trait), tostring(c.u.g))) end
+    table.sort(sigT)
+    local sig = table.concat(sigT, ",") .. "|" .. tostring(CFG.raidTeam)
+    local s = B.raidSim
+    if s and s.sig == sig and s.team == C.MODE.raidTeamKey(B.prof) and os.time() - (tonumber(s.at) or 0) < 7200 then return end
+    local okS, SIM, from = MT.loadSim()
+    if not okS then
+        SF.log(1, "RAID", "simulator problem: couldn't load it from " .. from .. ": " .. tostring(SIM))
+        return MT.raidNote("couldn't load the simulator from " .. from .. ": " .. tostring(SIM))
+    end
+    MT.raidNote("simulating (loaded from " .. from .. ")")
+    local function entries(kinds)
+        local t = {}
+        for _, k in ipairs(kinds) do local b = bestOf[k]; if b then table.insert(t, { kind = k, level = b.u.level, trait = b.u.trait, g = b.u.g }) end end
+        return t
+    end
+    local function marginOf(kinds, steps)
+        task.wait()
+        local okM, m, base = pcall(SIM.margin, RAID.stage, entries(kinds), { steps = steps or 3 })
+        if not okM then
+            SF.log(1, "RAID", "sim error: " .. tostring(m))
+            MT.raidNote("simulator crashed: " .. tostring(m))
+            return 0, nil
+        end
+        return m, base
+    end
+    local team
+    local fixed = CFG.raidTeam and CFG.raidTeam ~= ""
+    if fixed then
+        team = {}
+        for k in C.MODE.raidTeamKey(B.prof):gmatch("[%w_]+") do table.insert(team, k) end
+    else
+        -- start from the last pick (still owned) topped up with the strongest, then hill-climb
+        team = {}
+        local inTeam = {}
+        for k in tostring(B.raidBest or ""):gmatch("[%w_]+") do if bestOf[k] and #team < 6 then table.insert(team, k); inTeam[k] = true end end
+        for _, c in ipairs(pool) do if #team < 6 and not inTeam[c.kind] then table.insert(team, c.kind); inTeam[c.kind] = true end end
+    end
+    local cur = marginOf(team)
+    if not fixed then
+        for _ = 1, 2 do
+            local bestSwap, bestM = nil, cur
+            for slot = 1, #team do
+                for _, c in ipairs(pool) do
+                    if not table.find(team, c.kind) then
+                        local trial = table.clone(team)
+                        trial[slot] = c.kind
+                        local m = marginOf(trial)
+                        if m > bestM * 1.03 then bestSwap, bestM = trial, m end
+                    end
+                end
+            end
+            if not bestSwap then break end
+            team, cur = bestSwap, bestM
+        end
+        local sorted = table.clone(team)
+        table.sort(sorted)
+        B.raidBest = table.concat(sorted, ",")
+    end
+    local key = C.MODE.raidTeamKey(B.prof)
+    -- the search only needs a ranking (3 steps); the gate needs the number itself (6 steps ≈ ±4%)
+    local margin, base = marginOf(team, 6)
+    base = base or {}
+    B.raidSim = { margin = margin, team = key, sig = sig, at = os.time(), wave = base.wave, won = base.won }
+    SF.saveSoon()
+    SF.log(1, "RAID", string.format("raid sim%s %s: %s (wave %s) · margin x%.2f → %s", fixed and " with your raid team" or " picked", key, base.won and "WIN" or "lose",
+        tostring(base.wave), margin, margin >= CFG.raidMinMargin and "raids allowed" or "raids held, keys saved"))
+    -- a crash inside a swap trial already left its note; only a clean finish overwrites it
+    local last = B.raidSimNote and B.raidSimNote.text or ""
+    if not last:find("crashed", 1, true) then
+        MT.raidNote(string.format("ran: %s on wave %s, margin x%.2f → %s", base.won and "wins" or "loses", tostring(base.wave), margin,
+            margin >= CFG.raidMinMargin and "raids allowed" or "raids held"))
+    end
+end
+
+-- tournament planner: the board ranks damage dealt in 10 minutes, and a team that survives already gets
+-- every coin it can spend, so the score is how much of the last, biggest waves it chews through before the
+-- clock runs out. The sim plays this week's tournament (its waves, element ×2/×0.5, $4000, 10 lives) for
+-- teams of owned heroes (single swaps, kept while the damage rises) and then each placement style, and
+-- keeps the best: B.tourneySim = {week, team, strat, score, sig, at, cal = real / predicted}.
+-- Runs in ordinary matches (never in the tournament itself); again when the roster or the week changes.
+function MT.tourneyCheck()
+    if not CFG.tourney or MT.tourney then return end
+    local okW, week = pcall(C.Catalog.tourneyAt, os.time())
+    if not (okW and type(week) == "table" and C.Catalog.tourneyWave) then return end
+    local bestOf = {}
+    for _, u in pairs(B.prof.units or {}) do
+        local sc = C.M.unitScore(u, true) * (C.Catalog.tourneyMult(week, u.kind) or 1)
+        if MT.levels(u.kind) and (not bestOf[u.kind] or sc > bestOf[u.kind].s) then bestOf[u.kind] = { s = sc, u = u } end
+    end
+    local pool = {}
+    for k, b in pairs(bestOf) do table.insert(pool, { kind = k, s = b.s }) end
+    table.sort(pool, function(a, b) return a.s > b.s end)
+    while #pool > 12 do table.remove(pool) end
+    if #pool == 0 then return end
+    local sigT = {}
+    for _, c in ipairs(pool) do local u = bestOf[c.kind].u; table.insert(sigT, string.format("%s:%s:%s:%s", c.kind, tostring(u.level), tostring(u.trait), tostring(u.g))) end
+    table.sort(sigT)
+    local sig = tostring(week.n) .. "|" .. table.concat(sigT, ",")
+    local old = B.tourneySim
+    if old and old.sig == sig and os.time() - (tonumber(old.at) or 0) < 6 * 3600 then return end
+    local okS, SIM = MT.loadSim()
+    if not (okS and SIM.tourney) then return SF.log(1, "TOURNEY", "planner: couldn't load the simulator: " .. tostring(SIM)) end
+    SF.status("Tourney", "planning the tournament team (simulating)…")
+    local function entries(kinds)
+        local t = {}
+        for _, k in ipairs(kinds) do local b = bestOf[k]; if b then table.insert(t, { kind = k, level = b.u.level, trait = b.u.trait, g = b.u.g }) end end
+        return t
+    end
+    local runs = 0
+    local function scoreOf(kinds, strat, occ)
+        task.wait()
+        runs = runs + 1
+        local ok, r = pcall(SIM.tourney, week, entries(kinds), { strat = strat or "front", occ = occ })
+        if not ok then SF.log(1, "TOURNEY", "planner sim error: " .. tostring(r)); return 0, {} end
+        return tonumber(r.score) or 0, r
+    end
+    -- start from the last pick (still owned), topped up with the strongest
+    local team, seen = {}, {}
+    for k in tostring(old and old.team or ""):gmatch("[%w_]+") do if bestOf[k] and #team < C.Catalog.SLOTS then table.insert(team, k); seen[k] = true end end
+    for _, c in ipairs(pool) do if #team < C.Catalog.SLOTS and not seen[c.kind] then table.insert(team, c.kind); seen[c.kind] = true end end
+    local function climb(cur, strat, rounds)
+        for _ = 1, rounds do
+            if not SF.alive or MT.tourney then return cur end
+            local bestT, bestS = nil, cur
+            for slot = 1, #team do
+                for _, c in ipairs(pool) do
+                    if not table.find(team, c.kind) then
+                        local trial = table.clone(team)
+                        trial[slot] = c.kind
+                        local s = scoreOf(trial, strat)
+                        if s > bestS * 1.01 then bestT, bestS = trial, s end
+                    end
+                end
+            end
+            if not bestT then break end
+            team, cur = bestT, bestS
+        end
+        return cur
+    end
+    local strat = old and C.STRATS[old.strat or ""] and old.strat or "front"
+    local cur = climb(scoreOf(team, strat), strat, 3)
+    if not SF.alive or MT.tourney then return end
+    local stratS, line = cur, {}
+    for _, st in ipairs(C.STRAT_ORDER) do
+        local s = st == strat and cur or scoreOf(team, st)
+        table.insert(line, string.format("%s %.0fM", st, s / 1e6))
+        if s > stratS * 1.01 then strat, stratS = st, s end
+    end
+    -- the best team for one placement style isn't always the best for another: one more swap round
+    stratS = climb(stratS, strat, 1)
+    -- measured placement: put heroes where the waves' HP really piled up in the best run, re-measure, twice
+    local occ
+    local _, bestR = scoreOf(team, strat)
+    local seed = bestR and bestR.occ
+    for _ = 1, 2 do
+        if not seed then break end
+        local s, r = scoreOf(team, "crowd", seed)
+        table.insert(line, string.format("crowd %.0fM", s / 1e6))
+        if s > stratS * 1.01 then strat, stratS, occ = "crowd", s, seed end
+        seed = r and r.occ
+    end
+    local sorted = table.clone(team)
+    table.sort(sorted)
+    local cal = old and tonumber(old.cal) or nil
+    B.tourneySim = { week = tostring(week.n), team = table.concat(sorted, ","), strat = strat, occ = occ, score = stratS, sig = sig, at = os.time(), cal = cal }
+    SF.saveSoon()
+    SF.log(1, "TOURNEY", string.format("planner (%d sims): %s · %s placement → %.1fM damage predicted%s · placements: %s", runs, table.concat(sorted, " "), strat,
+        stratS / 1e6, cal and string.format(" (≈%.1fM after calibration x%.2f)", stratS * cal / 1e6, cal) or "", table.concat(line, ", ")))
+    SF.status("Tourney", string.format("planned: %s · %s placement · %.1fM predicted", table.concat(sorted, " "), strat, stratS * (cal or 1) / 1e6))
+end
+
+-- clear planner: on a normal map (story, challenge, Lich Lair) the sim plays it the farm's way — early calls,
+-- the server's wave pacing, the challenge's modifiers — for teams of owned heroes and each placement style,
+-- and keeps the fastest that still wins with 30% more enemy HP. It's only trusted where the sim's time for
+-- the team really played matches the real average within 25% (some maps it doesn't model well yet); real
+-- runs with the plan that come out slower than before reject it. B.clearPlan[modeKey] =
+-- {team, strat, t, base, real, sig, at, trusted, rejected, runs, sum}
+function MT.clearCheck()
+    if not CFG.clearPlans or MT.tourney or MT.raid or MT.infinite then return end
+    local key = MT.modeKey()
+    if key:find("^inf:") then return end -- endless: there is no clear to speed up
+    local rec = B.stages[key] or {}
+    local real = tonumber(rec.sec)
+    if not real or (rec.runs or 0) < 2 then return end -- needs a real average to compare against
+    local info = MT.info or {}
+    local mods = MT.mods or {}
+    local modsSig = {}
+    for k, v in pairs(mods) do if v ~= 1 then table.insert(modsSig, k .. "=" .. tostring(v)) end end
+    table.sort(modsSig)
+    local bestOf = {}
+    for _, u in pairs(B.prof.units or {}) do
+        local sc = C.M.unitScore(u, true)
+        if MT.levels(u.kind) and (not bestOf[u.kind] or sc > bestOf[u.kind].s) then bestOf[u.kind] = { s = sc, u = u } end
+    end
+    local pool = {}
+    for k, b in pairs(bestOf) do table.insert(pool, { kind = k, s = b.s }) end
+    table.sort(pool, function(a, b) return a.s > b.s end)
+    while #pool > 10 do table.remove(pool) end
+    local sigT = {}
+    for _, c in ipairs(pool) do local u = bestOf[c.kind].u; table.insert(sigT, string.format("%s:%s:%s", c.kind, tostring(u.level), tostring(u.trait))) end
+    table.sort(sigT)
+    -- the server's game speed on this map (rec.pace): sim seconds / pace = real seconds
+    local pace = U.clamp(tonumber(rec.pace) or 1, 0.5, 4)
+    local sig = table.concat(modsSig, ",") .. "|" .. table.concat(sigT, ",") .. string.format("|x%.1f", pace)
+    local old = B.clearPlan[key]
+    if old and old.sig == sig and os.time() - (tonumber(old.at) or 0) < 12 * 3600 then return end
+    -- this match plays the plan: keep it until real runs have judged it (a re-plan now would get the credit)
+    if old and MT.planKey == key and not old.rejected and os.time() - (tonumber(old.at) or 0) < 12 * 3600 then return end
+    local okS, SIM = MT.loadSim()
+    if not (okS and SIM.clear) then return end
+    local entriesFrom = function(kinds)
+        local t = {}
+        for _, k in ipairs(kinds) do local b = bestOf[k]; if b then table.insert(t, { kind = k, level = b.u.level, trait = b.u.trait, g = b.u.g }) end end
+        return t
+    end
+    local runs = 0
+    local function timeOf(kinds, strat, hp)
+        task.wait()
+        runs = runs + 1
+        -- the same reach cut the farm places with here (MT.updateReachCut: where enemies really get)
+        local ok, r = pcall(SIM.clear, MT.stage, entriesFrom(kinds), { mods = mods, aggr = MT.aggr, strat = strat or "front", hp = hp, cut = MT.reachCut })
+        if not ok or not r.won or (r.leaks or 0) > 0 then return math.huge, r end
+        return r.t / pace, r
+    end
+    -- the team really played here, through the sim: does it match the real average?
+    local playing = {}
+    for _, k in ipairs(info.slots or {}) do if bestOf[k] then table.insert(playing, k) end end
+    if #playing == 0 then return end
+    local base = timeOf(playing)
+    local trusted = base < math.huge and math.abs(base - real) / real <= 0.25
+    if not trusted then
+        B.clearPlan[key] = { sig = sig, at = os.time(), trusted = false, base = base < math.huge and base or nil, real = real }
+        SF.saveSoon()
+        return SF.log(1, "PLAN", string.format("%s: the sim says %s for this team (game speed x%.2f%s), real runs take %ds — not trusted on this map yet, keeping the normal team",
+            MT.stageName(), base < math.huge and (math.floor(base) .. "s") or "a loss", pace, rec.pace and "" or " — not measured yet", math.floor(real)))
+    end
+    SF.status("Plan", "planning the fastest clear here (simulating)…")
+    local team = table.clone(playing)
+    while #team < C.Catalog.SLOTS and #team < #pool do
+        for _, c in ipairs(pool) do if not table.find(team, c.kind) then table.insert(team, c.kind) break end end
+    end
+    local cur = timeOf(team)
+    for _ = 1, 2 do
+        if not SF.alive or SF.where ~= "match" then return end
+        local bestT, bestS = nil, cur
+        for slot = 1, #team do
+            for _, c in ipairs(pool) do
+                if not table.find(team, c.kind) then
+                    local trial = table.clone(team)
+                    trial[slot] = c.kind
+                    local s = timeOf(trial)
+                    if s < bestS * 0.97 then bestT, bestS = trial, s end
+                end
+            end
+        end
+        if not bestT then break end
+        team, cur = bestT, bestS
+    end
+    local strat = "front"
+    for _, st in ipairs(C.STRAT_ORDER) do
+        if st ~= "front" then
+            local s = timeOf(team, st)
+            if s < cur * 0.97 then strat, cur = st, s end
+        end
+    end
+    -- worth it (5%+ faster than the team played now) and safe (still a clean win with 30% more enemy HP)?
+    local safe = timeOf(team, strat, 1.3) < math.huge
+    local sorted = table.clone(team)
+    table.sort(sorted)
+    local plan = { sig = sig, at = os.time(), trusted = true, base = base, real = real, t = cur, team = table.concat(sorted, ","), strat = strat, runs = 0, sum = 0 }
+    if not (cur < base * 0.95 and safe) then plan.team, plan.strat = nil, nil end
+    B.clearPlan[key] = plan
+    SF.saveSoon()
+    SF.log(1, "PLAN", string.format("%s (%d sims): sim matches real (%ds vs %ds at x%.2f game speed) · %s", MT.stageName(), runs, math.floor(base), math.floor(real), pace,
+        plan.team and string.format("fastest: %s · %s placement → %ds (%.0f%% faster)", table.concat(sorted, " "), strat, math.floor(cur), (1 - cur / base) * 100)
+        or string.format("the team played now is already about the fastest%s", safe and "" or " (faster options weren't safe)")))
+end
+-- Infinite planner: the same search, but for the deepest wave (Lich Portals drop every 10 waves). Real
+-- Infinite runs end at a death wave; the plan is only trusted where the sim's wave for the team played now
+-- is within 15% of the real average (rec.infWave), and real runs with the plan that die earlier reject it
+function MT.infCheck()
+    if not CFG.clearPlans or not MT.infinite or MT.tourney or MT.raid then return end
+    local key = MT.modeKey()
+    local rec = B.stages[key] or {}
+    local real = tonumber(rec.infWave) or tonumber(rec.lastWave)
+    if not real or real < 5 or (rec.runs or 0) < 2 then return end
+    local bestOf = {}
+    for _, u in pairs(B.prof.units or {}) do
+        local sc = C.M.unitScore(u, true)
+        if MT.levels(u.kind) and (not bestOf[u.kind] or sc > bestOf[u.kind].s) then bestOf[u.kind] = { s = sc, u = u } end
+    end
+    local pool = {}
+    for k, b in pairs(bestOf) do table.insert(pool, { kind = k, s = b.s }) end
+    table.sort(pool, function(a, b) return a.s > b.s end)
+    while #pool > 10 do table.remove(pool) end
+    local sigT = {}
+    for _, c in ipairs(pool) do local u = bestOf[c.kind].u; table.insert(sigT, string.format("%s:%s:%s", c.kind, tostring(u.level), tostring(u.trait))) end
+    table.sort(sigT)
+    local sig = "inf|" .. table.concat(sigT, ",")
+    local old = B.clearPlan[key]
+    if old and old.sig == sig and os.time() - (tonumber(old.at) or 0) < 12 * 3600 then return end
+    if old and MT.planKey == key and not old.rejected and os.time() - (tonumber(old.at) or 0) < 12 * 3600 then return end
+    local okS, SIM = MT.loadSim()
+    if not (okS and SIM.infinite) then return end
+    local function entries(kinds)
+        local t = {}
+        for _, k in ipairs(kinds) do local b = bestOf[k]; if b then table.insert(t, { kind = k, level = b.u.level, trait = b.u.trait, g = b.u.g }) end end
+        return t
+    end
+    local runs = 0
+    -- deepest wave, a little credit for lasting longer on it
+    local function depth(kinds, strat)
+        task.wait()
+        runs = runs + 1
+        local ok, r = pcall(SIM.infinite, MT.stage, entries(kinds), { strat = strat or "front" })
+        if not ok then return 0 end
+        return (tonumber(r.wave) or 0) + math.min(0.9, (tonumber(r.t) or 0) / 1e5)
+    end
+    local playing = {}
+    for _, k in ipairs(MT.info.slots or {}) do if bestOf[k] then table.insert(playing, k) end end
+    if #playing == 0 then return end
+    local base = depth(playing)
+    if math.abs(math.floor(base) - real) / real > 0.15 then
+        B.clearPlan[key] = { sig = sig, at = os.time(), trusted = false, base = math.floor(base), real = real, inf = true }
+        SF.saveSoon()
+        return SF.log(1, "PLAN", string.format("%s Infinite: the sim reaches wave %d with this team, real runs end around wave %d — not trusted here yet",
+            MT.stageName(), math.floor(base), math.floor(real)))
+    end
+    SF.status("Plan", "planning the deepest Infinite run here (simulating)…")
+    local team = table.clone(playing)
+    local cur = base
+    for _ = 1, 2 do
+        if not SF.alive or SF.where ~= "match" then return end
+        local bestT, bestS = nil, cur
+        for slot = 1, #team do
+            for _, c in ipairs(pool) do
+                if not table.find(team, c.kind) then
+                    local trial = table.clone(team)
+                    trial[slot] = c.kind
+                    local s = depth(trial)
+                    if s >= bestS + 1 then bestT, bestS = trial, s end
+                end
+            end
+        end
+        if not bestT then break end
+        team, cur = bestT, bestS
+    end
+    local strat = "front"
+    for _, st in ipairs(C.STRAT_ORDER) do
+        if st ~= "front" then
+            local s = depth(team, st)
+            if s >= cur + 1 then strat, cur = st, s end
+        end
+    end
+    local sorted = table.clone(team)
+    table.sort(sorted)
+    local plan = { sig = sig, at = os.time(), trusted = true, inf = true, base = math.floor(base), real = real, wave = math.floor(cur), team = table.concat(sorted, ","), strat = strat, runs = 0, sum = 0 }
+    -- worth it: at least 3 waves (or 5%) deeper than the team played now
+    if math.floor(cur) < math.floor(base) + math.max(3, base * 0.05) then plan.team, plan.strat = nil, nil end
+    B.clearPlan[key] = plan
+    SF.saveSoon()
+    SF.log(1, "PLAN", string.format("%s Infinite (%d sims): sim wave %d vs real ~%d · %s", MT.stageName(), runs, math.floor(base), math.floor(real),
+        plan.team and string.format("deepest: %s · %s placement → wave %d", table.concat(sorted, " "), strat, math.floor(cur))
+        or "the team played now is already about the deepest"))
+end
+function MT.stageName()
+    local st = C.Catalog.stage(MT.stage)
+    return (st and st.name or ("stage " .. tostring(MT.stage))) .. (MT.challenge and " [challenge]" or "")
+end
+
+-- match info (team kinds, levels, traits, grades). The server sometimes answers before the team is in:
+-- retry, and fall back to the team cached from the lobby so the run never sits with nothing to place
+function MT.loadInfo()
+    local info
+    for _ = 1, 5 do
+        local ok, r = pcall(function() return C.R("GetMatchInfo"):InvokeServer() end)
+        if ok and type(r) == "table" then
+            info = r
+            if type(r.slots) == "table" and #r.slots > 0 then break end
+        end
+        task.wait(2)
+    end
+    info = info or {}
+    if type(info.slots) ~= "table" or #info.slots == 0 then
+        local p = B.prof or {}
+        local slots, levels, traits, grades = {}, {}, {}, {}
+        for _, id in ipairs(p.slots or {}) do
+            local u = p.units and p.units[id]
+            if u and u.kind and not table.find(slots, u.kind) then
+                table.insert(slots, u.kind)
+                levels[u.kind], traits[u.kind], grades[u.kind] = u.level, u.trait, u.g
+            end
+        end
+        info.slots = slots
+        info.levels = next(info.levels or {}) and info.levels or levels
+        info.traits = next(info.traits or {}) and info.traits or traits
+        info.grades = next(info.grades or {}) and info.grades or grades
+        SF.log(1, "BATTLE", "match info had no team — using the lobby team: " .. table.concat(slots, ","))
+        MT.infoFallback = true
+    else
+        MT.infoFallback = false
+    end
+    MT.info = info
+    return info
+end
+
+function MT.run()
+    MT.dmgDelta = {}
+    MT.loadInfo()
+    MT.stage = MT.info.stage
+    MT.infinite = MT.info.infinite == true or (B.pending and B.pending.infinite and tonumber(B.pending.stage) == tonumber(MT.stage)) or false
+    MT.raid = MT.info.raid == true or (C.Catalog.RAID and MT.stage == C.Catalog.RAID.stage) or false
+    MT.tourney = type(MT.info.tourney) == "table" or (B.pending and B.pending.tourney) or false
+    if MT.tourney then MT.tourneyWeek = select(2, pcall(C.Catalog.tourneyAt, os.time())) end
+    MT.planStrat = nil -- set below once the mode key is known (MT.planFor)
+    local wOf = C.Catalog.worldOf(tonumber(MT.stage) or 0)
+    MT.portal = (wOf and C.Catalog.PORTAL and wOf.id == C.Catalog.PORTAL.world) or false
+    if B.pending and B.pending.challenge and B.pending.stage == MT.stage then
+        MT.challenge = B.pending.challenge
+        local okC, ch = pcall(C.Catalog.challenge, MT.challenge)
+        MT.mods = okC and ch and C.Catalog.challengeMods(ch) or nil
+    end
+    local ev = C.R("Event")
+    table.insert(SF.conns, ev.OnClientEvent:Connect(function(seq, name, d)
+        local ok, e = pcall(MT.onEvent, seq, name, d)
+        if not ok then SF.log(1, "BATTLE", "event " .. tostring(name) .. ": " .. tostring(e)) end
+    end))
+    MT.resync()
+    MT.runStart = os.time()
+    MT.joinedMidRun = (tonumber(MT.wave) or 0) > 1
+    MT.teamDmgAt = MT.teamDmg or 0
+    -- the clear plan's placement style, when this match really has the plan's team
+    do
+        local plan = not MT.tourney and not MT.raid and C.MODE.clearPlan({ stage = MT.stage, challenge = MT.challenge, portal = MT.portal, infinite = MT.infinite })
+        local kinds = table.clone(MT.info.slots or {})
+        table.sort(kinds)
+        MT.planKey = plan and table.concat(kinds, ",") == plan.team and MT.modeKey() or nil
+        MT.planStrat = MT.planKey and plan.strat or nil
+    end
+    MT.initMap()
+    MT.resetRun()
+    task.delay(15, function()
+        local ok, err = pcall(MT.raidCheck)
+        if not ok then
+            SF.log(1, "RAID", "simulator crashed: " .. tostring(err))
+            pcall(MT.raidNote, "simulator crashed: " .. tostring(err))
+        end
+        local okT, errT = pcall(MT.tourneyCheck)
+        if not okT then SF.log(1, "TOURNEY", "planner crashed: " .. tostring(errT)) end
+        local okP, errP = pcall(MT.infinite and MT.infCheck or MT.clearCheck)
+        if not okP then SF.log(1, "PLAN", "clear planner crashed: " .. tostring(errP)) end
+    end)
+    local st = C.Catalog.stage(MT.stage)
+    SF.log(1, "BATTLE", string.format("in %s (stage %s)%s · team %s", st and st.name or "?", tostring(MT.stage), MT.challenge and (" challenge " .. MT.challenge) or "", table.concat(MT.info.slots or {}, ",")))
+    if MT.over then
+        local s = SF.request("Sync", C.R("Sync"))
+        MT.won = type(s) == "table" and s.won == true
+        task.spawn(MT.finish)
+    end
+    local lastT = U.now()
+    local lastSync, lastStart, lastAb, lastTgt, lastInfo = 0, 0, 0, 0, U.now()
+    MT.progressAt, MT.progressKey = U.now(), ""
+    while SF.alive and SF.where == "match" do
+        local t = U.now()
+        local dt = t - lastT
+        lastT = t
+        -- watchdog 1: no heroes of mine on the road → refresh the team info (every 10s)
+        local mineN = 0
+        for _, tw in pairs(MT.towers) do if MT.mine(tw) then mineN = mineN + 1 end end
+        if CFG.master and not MT.over and mineN == 0 and t - lastInfo > 10 then
+            lastInfo = t
+            task.spawn(MT.loadInfo)
+        end
+        -- watchdog 2: nothing changes (wave, money, heroes, over) for 3 minutes → go home and relaunch
+        local key = table.concat({ tostring(MT.wave), tostring(MT.money), tostring(mineN), tostring(MT.over), tostring(MT.alive) }, "|")
+        if key ~= MT.progressKey then MT.progressKey, MT.progressAt = key, t end
+        if CFG.master and CFG.play and t - MT.progressAt > 180 and not MT.finishing then
+            SF.log(0, "BATTLE", "no progress for 3 min (wave " .. tostring(MT.wave) .. ", " .. mineN .. " heroes) — heading home to relaunch")
+            MT.progressAt = t
+            SF.flush()
+            SF.request("ReturnToHub", C.R("ReturnToHub"))
+        end
+        pcall(MT.scanEnemies)
+        pcall(MT.paceSample, t)
+        MT.learnTick(dt)
+        if CFG.master and CFG.battle and not MT.over then
+            if t - lastSync > 8 then lastSync = t; MT.resync() end
+            local ok, e = pcall(MT.economy)
+            if not ok then SF.log(1, "BATTLE", "economy: " .. tostring(e)) end
+            local okC, eC = pcall(MT.callWave, t)
+            if not okC then SF.log(1, "WAVES", tostring(eC)) end
+            if t - lastTgt > 2 then lastTgt = t; pcall(MT.retarget) end
+            if CFG.autoStart and not MT.running and MT.enemies == 0 and U.count(MT.towers) > 0 and t - lastStart > 3 then
+                lastStart = t
+                SF.request("Act:start", C.R("Act"), "start")
+            end
+            if t - lastAb > 1 then lastAb = t; pcall(MT.abilities) end
+        end
+        local myN, myLv = 0, 0
+        for _, tw in pairs(MT.towers) do if MT.mine(tw) then myN = myN + 1; myLv = myLv + tw.level end end
+        local wavesTxt = (tonumber(MT.waves) and MT.waves > 0) and ("/" .. MT.waves) or ""
+        SF.status("Battle", string.format("wave %s%s · %s lives · $%s · %d heroes placed (levels total %d) · %d enemies, the furthest %.0f%% down the road%s",
+            tostring(MT.wave), wavesTxt, tostring(MT.lives), U.fmt(MT.money), myN, myLv, MT.alive or MT.enemies,
+            (MT.reachNow or 0) * 100, MT.over and (" · " .. (MT.won and "WON" or "LOST")) or ""))
+        task.wait(0.25)
+    end
+end
+
+-- ============================================================
+--  LOBBY SCHEDULER
+-- ============================================================
+HUB.SYSTEMS = {
+    { name = "Rewards", fn = HUB.rewards, every = 30 },
+    { name = "Teller", fn = HUB.teller, every = 30 },
+    { name = "Evolve", fn = HUB.evolve, every = 10 },
+    { name = "Cleanup", fn = HUB.cleanup, every = 30 },
+    { name = "Banner", fn = HUB.eventBanner, every = 10 },
+    { name = "Summon", fn = HUB.summon, every = 6 },
+    { name = "Feed", fn = HUB.feed, every = 6 },
+    { name = "Traits", fn = HUB.traits, every = 8 },
+    { name = "Stats", fn = HUB.stats, every = 8 },
+    { name = "Tourney", fn = HUB.tourneyFetch, every = 120 },
+    -- team last: it sees this visit's summons, feeds and rerolls before the launch
+    { name = "Team", fn = HUB.team, every = 8 },
+    { name = "Mode", fn = HUB.play, every = 4, last = true },
+}
+function HUB.run()
+    local pc = C.R("ProfileChanged")
+    if pc then
+        table.insert(SF.conns, pc.OnClientEvent:Connect(function(p)
+            if type(p) == "table" and type(p.units) == "table" then HUB.setProfile(p)
+            elseif type(p) == "table" and type(p.profile) == "table" then HUB.setProfile(p.profile) end
+        end))
+    end
+    HUB.refresh(true)
+    local nextAt = {}
+    local settleAt = U.now() + 1.5 -- every lobby second is dead time between maps: launch as soon as chores are done
+    while SF.alive and SF.where == "hub" do
+        -- after a launch nothing else may run (a team change during the teleport would undo the raid team)
+        if CFG.master and not HUB.launched then
+            local didWork = false
+            for _, s in ipairs(HUB.SYSTEMS) do
+                if not s.last and U.now() >= (nextAt[s.name] or 0) then
+                    nextAt[s.name] = U.now() + s.every
+                    local g0 = HUB.prof and HUB.prof.gems
+                    local before = HUB.lastProfileAt
+                    local ok, e = pcall(s.fn)
+                    if not ok then SF.log(0, s.name:upper(), "error: " .. tostring(e)); SF.status(s.name, "error: " .. tostring(e)) end
+                    if HUB.lastProfileAt ~= before and (HUB.prof and HUB.prof.gems) ~= g0 then didWork = true end
+                    task.wait(0.15)
+                end
+            end
+            -- launch only once the lobby chores are idle
+            local mode = HUB.SYSTEMS[#HUB.SYSTEMS]
+            if U.now() >= settleAt and not didWork and U.now() >= (nextAt[mode.name] or 0) then
+                nextAt[mode.name] = U.now() + mode.every
+                local ok, e = pcall(mode.fn)
+                if not ok then SF.log(0, "MODE", "error: " .. tostring(e)) end
+            end
+        end
+        task.wait(0.3)
+    end
+end
+
+-- ============================================================
+--  GUI (NexusLib)
+-- ============================================================
+local GUI = { UI = {}, LIVE = {} }
+function GUI.load()
+    local function try(src, from)
+        if type(src) ~= "string" or #src == 0 then return nil end
+        local fn, err = loadstring(src)
+        if not fn then warn("[CKD] NexusLib (" .. from .. ") compile error: " .. tostring(err)) return nil end
+        local ok, lib = pcall(fn)
+        if ok and type(lib) == "table" and type(lib.Window) == "function" then return lib end
+        return nil
+    end
+    local okR, src = pcall(function() return isfile("NexusLib.lua") and readfile("NexusLib.lua") or nil end)
+    local lib = okR and try(src, "file")
+    if lib then return lib end
+    local ok, s = pcall(function() return game:HttpGet(C.NEXUS_URL) end)
+    return ok and try(s, "url") or nil
+end
+function GUI.build()
+    local Lib = GUI.load()
+    if not Lib then warn("[CKD] NexusLib failed to load — running without a window") return end
+    -- Candy UI theme: mutate NexusLib's exported palette before the window is constructed.
+    -- NexusLib.Colors is the same table the library uses internally, so every control inherits it.
+    if Lib.Colors then
+        local P = Lib.Colors
+        P.bg       = Color3.fromRGB(18, 11, 28)
+        P.panel    = Color3.fromRGB(29, 17, 43)
+        P.card     = Color3.fromRGB(42, 24, 58)
+        P.border   = Color3.fromRGB(82, 52, 102)
+        P.accent   = Color3.fromRGB(255, 105, 180)
+        P.accentD  = Color3.fromRGB(205, 72, 146)
+        P.accentBg = Color3.fromRGB(68, 30, 73)
+        P.text     = Color3.fromRGB(250, 244, 255)
+        P.sub      = Color3.fromRGB(204, 184, 216)
+        P.green    = Color3.fromRGB(99, 230, 163)
+        P.purple   = Color3.fromRGB(192, 132, 252)
+        P.red      = Color3.fromRGB(255, 105, 120)
+        P.orange   = Color3.fromRGB(255, 170, 92)
+        P.gold     = Color3.fromRGB(255, 219, 112)
+    end
+    local title = "🍭 Candy Kingdom Defense"
+    local Win = Lib:Window({ title = title, subtitle = "Smart Farm  •  Adaptive Auto Farm  •  v" .. VERSION, width = 900, height = 610 })
+    GUI.Win = Win
+    pcall(function()
+        local sg = LP:FindFirstChildOfClass("PlayerGui"):FindFirstChild("NexusLib_" .. title:gsub("%s", ""))
+        if sg then sg.DisplayOrder = 100000 end
+    end)
+    local UI, LIVE = GUI.UI, GUI.LIVE
+    local function setCfg(k, v) CFG[k] = v; SF.saveSoon() end
+    local function tog(T, label, desc, key) UI[key] = T:Toggle(label, desc, CFG[key], function(on) setCfg(key, on) end) end
+    local function sld(T, label, desc, key, o) o.default = CFG[key]; UI[key] = T:Slider(label, desc, o, function(v) setCfg(key, v) end) end
+    local function int(v) return tostring(math.floor(v + 0.5)) end
+    local function notify(t, m, k) pcall(function() Win:Notify(t, m, 3, k or "default") end) end
+    -- systems outside the window (a new hero from the banner) pop up through this (SF: declared at the top)
+    SF.notify = function(t, m, k) pcall(function() Win:Notify(t, m, 6, k or "default") end) end
+
+    GUI.COL = Lib.Colors or {}
+    local T = Win:Tab("🏠", "Dashboard")
+    UI.master = T:Toggle("Smart Farm", "Master switch for every system (lobby + match)", CFG.master, function(on)
+        setCfg("master", on); Win:Status(on and "▶ Farming" or "⏸ Paused")
+    end)
+    GUI.SYSTEMS = { "Mode", "Battle", "Economy", "Placement", "Upgrade", "Abilities", "Match", "Evolve", "Banner", "Summon", "Team", "Feed", "Traits", "Stats", "Tourney", "Cleanup", "Rewards" }
+    if T.StatusCard and T.StatGrid and T.KeyValue then
+        -- NexusLib 1.7+: what it's doing and why, goals at a glance, then every system in one compact list
+        T:Section("🍬 Live Run")
+        GUI.nowCard = T:StatusCard({ icon = "⏳", title = "Starting…", text = "", sub = "" })
+        GUI.nextCard = T:StatusCard({ icon = "⏭", title = "Up next", text = "", sub = "" })
+        T:Section("🎯 Progress Goals")
+        GUI.goals = T:StatGrid({ "Lich Lord", "Oh My Glob", "Raid", "Gems", "Lich Portals", "Team Power" }, 3)
+        T:Section("⚙️ Automation Systems")
+        GUI.systems = T:KeyValue(GUI.SYSTEMS, 84)
+    else
+        T:Section("Systems")
+        for _, k in ipairs(GUI.SYSTEMS) do LIVE[k] = T:Label(k .. ": ...") end
+    end
+    T:Section("⚡ Quick Controls")
+    T:Button("⏹", "Stop All", "Pause every system", Color3.fromRGB(239, 68, 68), function()
+        CFG.master = false; pcall(function() UI.master.Set(false, true) end); SF.saveNow(); notify("Stopped", "Smart Farm paused", "warning")
+    end)
+    T:Button("❌", "Unload", "Stop and remove the window", Color3.fromRGB(239, 68, 68), function() SF.unload() end)
+    T:Button("💬", "Join Discord", "Copy the community Discord invite", function()
+        if C.DISCORD_INVITE == "" then return notify("Discord", "No invite set", "warning") end
+        local ok = pcall(setclipboard, C.DISCORD_INVITE)
+        notify("Discord", ok and "Invite copied — paste it in your browser" or C.DISCORD_INVITE, ok and "success" or "info")
+    end)
+
+    local f2 = function(v) return string.format("%.2f", v) end
+    local pct = function(v) return string.format("%.0f%%", v * 100) end
+
+    -- ── Lobby: live resources on top, then one section per system ──
+    T = Win:Tab("🏰", "Heroes")
+    if T.StatGrid then
+        T:Section("Live")
+        GUI.lobbyTiles = T:StatGrid({ "Gems", "Trait Crystals", "Juice", "Storage", "Evolve Focus", "Stat Chase" }, 3)
+    end
+    T:Section("Team & Rewards")
+    tog(T, "Auto Rewards", "Daily login, quests, level milestones, battle pass", "rewards")
+    tog(T, "Auto Best Team", "6 strongest distinct heroes: stats × trait × grade × measured efficiency × pair passives", "team")
+    T:Section("Summon & Storage")
+    tog(T, "Auto Summon", "Summon whenever gems allow", "summon")
+    tog(T, "Only New Heroes", "Pull only while the banner offers a hero you don't own", "summonOnlyNew")
+    tog(T, "Halloween Banner", "Pull it with Halloween Candy while it has a hero you don't own (keeps candy an evolution needs)", "eventBanner")
+    tog(T, "10-Pulls Only", "Cheaper per pull, with an Epic floor", "summonTen")
+    sld(T, "Gem Reserve", "Never summon below this", "gemReserve", { min = 0, max = 10000, step = 250, format = int })
+    tog(T, "Storage Cleanup", "Delete weak spare copies when the backpack is nearly full (never team, Mythic+, traited)", "cleanup")
+    sld(T, "Clean When Free <", "Start cleaning below this many free slots", "cleanFree", { min = 5, max = 60, step = 5, format = int })
+    sld(T, "Clean Until Free", "Clear spares until this many slots are free", "cleanTo", { min = 10, max = 100, step = 5, format = int })
+    sld(T, "Keep Spare Copies", "Spares kept per hero besides its best copy", "keepCopies", { min = 0, max = 5, step = 1, format = int })
+    T:Section("Evolution")
+    tog(T, "Auto Evolve", "Evolve (crafting first) when the items and gems are in", "evolve")
+    sld(T, "Evolution Item Value", "Gem value of an item an evolution still needs (focus items ×3)", "evoItemValue", { min = 0, max = 400, step = 10, format = int })
+    tog(T, "Get S-Tier Evolutions", "Always evolve into S-tier heroes (Cosmic Dog, The Dark Cloud, Metal Reaper...) and farm their items", "sTierEvolve")
+    tog(T, "Teller's Candy Shop", "Buy the Elder Vampire + 5 Vampire Essence (The Dark Cloud) once 20,000 Halloween Candy is saved", "teller")
+    T:Section("Traits (Crystals)")
+    tog(T, "Auto Trait Reroll", "Reroll the strongest team heroes up to the keep rarity", "traits")
+    UI.traitKeep = T:Dropdown("Keep Traits At", "Stop rerolling at this trait rarity", { "Common", "Rare", "Epic", "Legendary", "Mythic" }, CFG.traitKeep, function(_, _, i) setCfg("traitKeep", tonumber(i) or 3) end)
+    sld(T, "Chase Legendary At", "With this many crystals, chase Hero of Ooo on the top heroes", "traitChaseAt", { min = 5, max = 200, step = 5, format = int })
+    sld(T, "Safe Chase Odds", "A hero with a decent trait is only rolled when the crystals land Hero of Ooo at least this often (a miss leaves a random trait)", "traitChaseOdds",
+        { min = 0, max = 0.9, step = 0.05, format = function(v) return string.format("%d%%", math.floor(v * 100 + 0.5)) end })
+    tog(T, "Oh My Glob Chase", "Save up, then roll the strongest hero for Oh My Glob (+200% damage)", "globChase")
+    sld(T, "Start Glob Chase At", "Crystals needed before a chase starts", "globChaseAt", { min = 200, max = 1500, step = 50, format = int })
+    sld(T, "Glob Chase Floor", "Stop the chase here (enough to roll a Legendary back)", "globFloor", { min = 0, max = 400, step = 10, format = int })
+    sld(T, "Crystal Reserve", "Never spend below this", "crystalReserve", { min = 0, max = 100, step = 1, format = int })
+    T:Section("Trait History (where the crystals went)")
+    LIVE.traitLog = T:Paragraph("no trait rolls yet")
+    T:Section("Stats (Juice)")
+    tog(T, "Auto Stat Reroll", "Lock two stats, reroll DMG then SPA up to the goal", "stats")
+    sld(T, "Stat Goal", "Target grade (13 B+ · 14 A- · 15 A)", "statGoal", { min = 12, max = 17, step = 1, format = int })
+    sld(T, "Stat Gem Floor", "2-lock rolls cost 100 gems: keep at least this many", "statGemFloor", { min = 0, max = 10000, step = 500, format = int })
+    sld(T, "Juice Reserve", "Keep this many Units of Juice", "juiceReserve", { min = 0, max = 100, step = 1, format = int })
+    T:Section("Feed")
+    tog(T, "Auto Feed", "Level promising heroes with candy and spare copies", "feed")
+    UI.fodder = T:Dropdown("Feed Spares Up To", "Rarity of spare copies used as XP food", { "Rare", "Epic", "Legendary" }, CFG.fodderMaxRarity, function(_, _, i) setCfg("fodderMaxRarity", tonumber(i) or 2) end)
+
+    -- ── Play: live route choice first, then Challenge controls and the other modes ──
+    T = Win:Tab("🗺️", "Play")
+    if T.StatusCard then
+        T:Section("🏆 Dungeon Train")
+        GUI.challengeCard = T:StatusCard({ icon = "🏆", title = "Checking challenge cars…", text = "", sub = "" })
+    end
+    T:Section("▶ Run Controller")
+    UI.goal = T:Dropdown("Goal", "Progress: beat maps fast, farm strength at walls · Gems: most gems per minute", { "Progress (beat maps fast)", "Gems per minute" }, CFG.goal, function(_, _, i) setCfg("goal", tonumber(i) or 1) end)
+    tog(T, "Auto Play", "Launch the best mode and keep chaining runs", "play")
+
+    T:Section("⚔️ Normal Stage Loop")
+    if T.StatusCard then
+        GUI.normalCard = T:StatusCard({ icon = "⚔️", title = "Selected Stage Loop · OFF", text = "", sub = "" })
+    end
+
+    local normalWorlds = C.MODE.normalWorlds()
+    local normalWorldNames, maxActs = {}, 1
+    for i, w in ipairs(normalWorlds) do
+        normalWorldNames[i] = w.name
+        maxActs = math.max(maxActs, #w.stages)
+    end
+    if #normalWorldNames == 0 then normalWorldNames = { "No worlds found" } end
+
+    local actNames = {}
+    for i = 1, maxActs do actNames[i] = "Act " .. tostring(i) end
+
+    CFG.normalWorld = math.clamp(math.floor(tonumber(CFG.normalWorld) or 1), 1, #normalWorldNames)
+    CFG.normalAct = math.clamp(math.floor(tonumber(CFG.normalAct) or 1), 1, maxActs)
+
+    UI.normalWorld = T:Dropdown("World", "Pick the normal world to replay", normalWorldNames, CFG.normalWorld, function(_, _, i)
+        setCfg("normalWorld", tonumber(i) or 1)
+        CFG.normalAct = 1
+        pcall(function() UI.normalAct.Set(1, true) end)
+    end)
+    UI.normalAct = T:Dropdown("Act", "Pick the act inside that world", actNames, CFG.normalAct, function(_, _, i)
+        setCfg("normalAct", tonumber(i) or 1)
+    end)
+    tog(T, "Selected Stage Loop", "Force this World + Act and replay it nonstop", "normalLoop")
+    T:Button("▶", "Start Selected Stage Loop", "Use the World + Act above and keep replaying that normal stage", function()
+        CFG.play = true
+        CFG.normalLoop = true
+        pcall(function() UI.play.Set(true, true) end)
+        pcall(function() UI.normalLoop.Set(true, true) end)
+        local m, note = C.MODE.selectedNormal(B.prof)
+        SF.saveNow()
+        if m then
+            notify("Normal Loop", "Locked to " .. tostring(note) .. " — replaying nonstop", "success")
+        else
+            notify("Normal Loop", tostring(note or "Selected stage is unavailable"), "warning")
+        end
+    end)
+    T:Button("🧠", "Return To Smart Planner", "Stop forcing one map and let the automatic route planner choose again", function()
+        CFG.normalLoop = false
+        pcall(function() UI.normalLoop.Set(false, true) end)
+        SF.saveNow()
+        notify("Normal Loop", "Smart planner is back in control", "info")
+    end)
+
+    T:Section("🏆 Challenge Farm")
+    tog(T, "Challenges", "Use the current Dungeon Train cars", "challenges")
+    UI.challengeMode = T:Dropdown("Challenge Behavior", "First wins only · keep repeats available · or endlessly rotate every active Dungeon Train car",
+        { "First wins only", "Keep farming", "Endless challenge loop" }, tonumber(CFG.challengeMode) or 3, function(_, _, i)
+            setCfg("challengeMode", tonumber(i) or 3)
+        end)
+    T:Button("🏆", "Start Endless Challenges", "Rotate all active cars forever; new cars are picked up automatically when the Train refreshes", function()
+        CFG.challenges = true; CFG.challengeMode = 3; CFG.normalLoop = false
+        pcall(function() UI.challenges.Set(true, true) end)
+        pcall(function() UI.normalLoop.Set(false, true) end)
+        pcall(function() UI.challengeMode.Set(3, true) end)
+        SF.saveNow()
+        notify("Challenge Farm", "Focus mode enabled — first wins first, then repeat cars", "success")
+    end)
+
+    if T.KeyValue then
+        T:Section("🧠 Next-Run Ranking")
+        GUI.rank = T:KeyValue({ "#1", "#2", "#3", "#4", "#5", "#6" }, 26)
+        T:Section("📊 Run Records")
+        GUI.records = T:KeyValue({ "1", "2", "3", "4", "5", "6", "7", "8" }, 170)
+    else
+        LIVE.modes = T:Paragraph("...")
+    end
+
+    T:Section("🗺️ Other Modes")
+    tog(T, "Story (first clears)", "Uncleared stages: gems, items, story quest, unlock", "story")
+    tog(T, "Farm (cleared stages)", "Replays: gems + items (evolution items count extra)", "farm")
+    tog(T, "Infinite", "Always allow Infinite (it's used for portals/keys anyway)", "infinite")
+    T:Section("🌀 Lich Lord Hunt")
+    tog(T, "Lich Lair", "Use Lich Portals: 2 Lich Ooze + 5% secret Lich Lord", "lich")
+    tog(T, "Hunt Lich Lord", "Until owned, value portals highly so Infinite farms them", "lichHunt")
+    sld(T, "Portal Value", "Gem value of a Lich Portal during the hunt", "lichPortalValue", { min = 0, max = 5000, step = 250, format = int })
+    T:Section("🥇 Tournament")
+    tog(T, "Weekly Tournament", "Play for the fixed rewards, then replay as the team grows", "tourney")
+    sld(T, "Replay When Stronger ×", "Team power growth needed for a replay", "tourneyRegrow", { min = 1, max = 2, step = 0.05, format = f2 })
+    T:Section("🎃 Halloween Raid")
+    tog(T, "Raids", "Raid with a key once the battle sim wins with headroom", "raids")
+    sld(T, "Raid Safety Margin", "Only raid if we'd still win against enemies this much tougher", "raidMinMargin", { min = 1, max = 2, step = 0.05, format = function(v) return string.format("+%d%%", math.floor((v - 1) * 100 + 0.5)) end })
+    tog(T, "Farm Raid Keys", "Out of keys: Nightosphere Infinite", "infKeys")
+    sld(T, "Keys To Hold", "Farm keys until you hold this many", "keyTarget", { min = 1, max = 10, step = 1, format = int })
+    T:Section("🛠️ Route Tuning")
+    sld(T, "Unlock Value", "Gem value of opening the next stage", "progressValue", { min = 0, max = 500, step = 10, format = int })
+    sld(T, "Exploration", "Optimism for modes with few runs", "exploreBonus", { min = 0, max = 1, step = 0.05, format = f2 })
+    sld(T, "Lobby Every N Runs", "Head home at least this often", "hubEvery", { min = 1, max = 20, step = 1, format = int })
+    sld(T, "Summon Trip Needs", "10-pulls of gems before a trip just to summon", "hubMinPulls", { min = 1, max = 6, step = 1, format = int })
+    T:Button("🧮", "Reset Mode Stats", "Forget win rates and run times", function()
+        table.clear(B.stages); table.insert(B.resets, { "modes", os.time() })
+        SF.log(1, "INFO", "mode stats reset by the player"); SF.saveNow(); notify("Modes", "stats reset", "success")
+    end)
+
+    -- ── Battle: what the farm has learned about each hero, then the switches ──
+    T = Win:Tab("⚔️", "Combat")
+    if T.KeyValue then
+        T:Section("Unit Learning · measured damage vs the game's numbers")
+        GUI.learn = T:KeyValue({ "u1", "u2", "u3", "u4", "u5", "u6", "u7", "u8" }, 120)
+    else
+        LIVE.kinds = T:Paragraph("...")
+    end
+    T:Section("Core")
+    tog(T, "Battle AI", "Run placement and upgrades in matches", "battle")
+    tog(T, "Auto Place", "Place heroes on the spot covering the most road", "place")
+    tog(T, "Auto Upgrade", "Buy by damage gained per coin (counts 2 levels ahead)", "upgrade")
+    tog(T, "Auto Start Waves", "Press start when the road is empty", "autoStart")
+    sld(T, "Save Threshold", "Buy an affordable option worth ≥ this share of the best", "saveRatio", { min = 0, max = 1, step = 0.05, format = pct })
+    T:Section("Abilities")
+    tog(T, "Auto Abilities", "Fire unlocked abilities", "abilities")
+    tog(T, "Ability Timing", "Hold for a crowd or a boss in range", "abilityTiming")
+    sld(T, "Max Hold (s)", "Never hold longer than this with enemies in range", "abilityHold", { min = 5, max = 60, step = 5, format = int })
+    T:Section("Team Synergy")
+    tog(T, "Pair Passives", "Pick and place partners so pair passives switch on", "passives")
+    tog(T, "Score Upgrade Attacks", "Rate heroes by their upgraded attacks (area hits, stuns, burns), not just the first one", "scorePath")
+    T:Section("Waves")
+    tog(T, "Early Wave Calls", "Send the next wave while the defense is well ahead (faster clears; turns itself off for the run after a leak)", "earlyCall")
+    sld(T, "Call With ≤ Enemies", "× learned boldness", "callAlive", { min = 1, max = 30, step = 1, format = int })
+    sld(T, "Call With Front ≤", "How far the lead enemy may be (× boldness)", "callReach", { min = 0.1, max = 0.9, step = 0.05, format = pct })
+    T:Section("Targeting & Selling")
+    tog(T, "Smart Targeting", "Heavy hitters target the strongest, fast ones the first", "smartTarget")
+    tog(T, "Sell Idle Heroes", "Sell heroes with no target for 3+ waves for a better buy", "sellIdle")
+    T:Button("🧮", "Reset Unit Learning", "Forget measured unit efficiency", function()
+        table.clear(B.kinds); table.insert(B.resets, { "learning", os.time() })
+        SF.log(1, "INFO", "unit learning reset by the player"); SF.saveNow(); notify("Battle", "learning reset", "success")
+    end)
+
+    T = Win:Tab("📜", "Activity")
+    tog(T, "Print To Console", "Mirror log lines to the executor console", "logConsole")
+    UI.logLevel = T:Dropdown("Log Level", "Quiet · Normal · Verbose", { "Quiet", "Normal", "Verbose" }, (CFG.logLevel or 1) + 1, function(_, _, i) setCfg("logLevel", math.clamp((tonumber(i) or 2) - 1, 0, 2)) end)
+    LIVE.log = T:Paragraph("...")
+    LIVE.totals = T:Label("...")
+
+    -- one card per change (bold title, readable text, coloured tag); plain lines on an older NexusLib
+    T = Win:Tab("📰", "What's New")
+    T:Section("💡 Suggest something for the farm")
+    local idea = ""
+    local ideaBox = T:Input("Your idea", "Sent anonymously (no Roblox name) · one every 10 min · 500 characters", "e.g. farm the next event's shop…", "", function(text) idea = tostring(text or "") end)
+    T:Button("📨", "Send Suggestion", "Goes straight to the script author", function()
+        local okG, got = pcall(function() return ideaBox._isProxy and ideaBox:Get() or ideaBox.Get() end)
+        if okG and type(got) == "string" and got ~= "" then idea = got end
+        task.spawn(function()
+            local ok, err = SF.REPORT.suggest(idea)
+            notify("Suggestion", ok and "sent — thank you!" or ("not sent: " .. tostring(err)), ok and "success" or "warning")
+            if ok then
+                idea = ""
+                pcall(function() if ideaBox._isProxy then ideaBox:Set("") else ideaBox.Set("") end end)
+            end
+        end)
+    end)
+    local TAG_COLOR = { NEW = Color3.fromRGB(74, 222, 128), IMPROVED = Color3.fromRGB(96, 165, 250), FIX = Color3.fromRGB(251, 191, 36) }
+    for _, e in ipairs(CHANGELOG) do
+        T:Section(string.format("v%s · %s · %s", e.v, e.title, e.date))
+        for _, it in ipairs(e.items) do
+            if T.StatusCard then
+                T:StatusCard({ icon = it[1], title = it[2], text = it[3], tag = it[4], tagColor = TAG_COLOR[it[4]], color = TAG_COLOR[it[4]] })
+            else
+                T:Label(it[1] .. " " .. it[2] .. " — " .. it[3])
+            end
+        end
+    end
+
+    T = Win:Tab("⚙️", "Settings")
+    tog(T, "Anti-AFK", "Send an input when Roblox flags you idle", "antiAfk")
+    T:Section("Help improve the script")
+    -- flipping it yourself is remembered as your choice (a new default never overrides it)
+    UI.shareStats = T:Toggle("Share anonymous stats", "Send match stats to the script author so the hero scores and placements improve for everyone (on by default — switch off any time)", CFG.shareStats, function(on)
+        if on ~= CFG.shareStats then CFG.shareChosen = true end
+        setCfg("shareStats", on)
+    end)
+    T:Paragraph("What is sent: a random id made on this PC (not your name or user id), the script version, and for each match: "
+        .. "the mode, win or loss, wave, run time and lives left, your team's heroes with level and trait, and where each of your heroes "
+        .. "stood with the damage it dealt. About once an hour also: wins/losses per mode, what the farm learned about each hero, "
+        .. "the raid simulator result, crystals/portals/keys/gems, a few settings and recent errors. Nothing else.")
+    T:Button("📤", "Send Report Now", "Send one report right away (needs sharing on)", function()
+        if not CFG.shareStats then notify("Report", "turn on Share anonymous stats first", "warning") return end
+        task.spawn(function()
+            pcall(SF.HIVE.flush, true)
+            local ok, err = SF.REPORT.send("manual")
+            notify("Report", ok and "sent — thank you!" or ("not sent: " .. tostring(err)), ok and "success" or "error")
+        end)
+    end)
+    tog(T, "Learn from the hive", "Blend every player's measured hero damage into the scores (most for heroes you've rarely played)", "useHive")
+    T:Button("💾", "Save Settings", "Write " .. C.SETTINGS, function() SF.saveNow(); notify("Saved", "settings written", "success") end)
+    Win:Status(CFG.master and "▶ Farming" or "⏸ Paused")
+    -- tell every player once that sharing is on, and where to switch it off
+    if CFG.shareStats and not CFG.shareNoticed then
+        CFG.shareNoticed = true
+        SF.saveSoon()
+        task.delay(4, function()
+            pcall(function() Win:Notify("Anonymous stats", "Match stats are shared to improve hero scores for everyone. Switch off: Settings → Help improve the script.", 10, "default") end)
+        end)
+        SF.log(1, "INFO", "anonymous match stats are on (Settings → Help improve the script to switch off)")
+    end
+    -- once per new version: point at the Updates tab
+    if CFG.seenVersion ~= VERSION then
+        local first = CFG.seenVersion == nil
+        CFG.seenVersion = VERSION
+        SF.saveSoon()
+        task.delay(first and 15 or 6, function()
+            pcall(function() Win:Notify("Updated to v" .. VERSION, CHANGELOG[1].title .. " — see the 📰 What's New tab for what's new.", 10, "default") end)
+        end)
+    end
+end
+-- the mode being played right now (match) as a mode table C.MODE.purpose understands
+function GUI.currentMode()
+    local m = B.pending
+    if not (m and m.stage == MT.stage) then
+        m = { stage = MT.stage, challenge = MT.challenge, infinite = MT.infinite, raid = MT.raid, portal = MT.portal, tourney = MT.tourney }
+    end
+    m = table.clone(m)
+    if MT.tourney then m.tourney = true end
+    if MT.portal then m.portal = true end
+    if m.infinite and not m.world then
+        local w = C.Catalog.worldOf(tonumber(m.stage) or 0)
+        m.world = w and w.id
+    end
+    return m
+end
+GUI.ICONS = { tourney = "🥇", raid = "🎃", portal = "🌀", infinite = "♾️", challenge = "🏆", manual = "🎯", first = "⭐", farm = "⚔️" }
+GUI.KIND_NAME = { tourney = "Tournament", raid = "Raid", portal = "Lich Lair", infinite = "Infinite", challenge = "Challenge", manual = "Selected Stage", first = "New map", farm = "Farm" }
+function GUI.modeKind(m)
+    return m.manual and "manual" or m.tourney and "tourney" or m.raid and "raid" or m.portal and "portal" or m.infinite and "infinite" or m.challenge and "challenge" or m.first and "first" or "farm"
+end
+-- a mode in plain words: "Penguin Parade · Challenge · 100% win · worth ≈372 gems/min"
+function GUI.plainMode(m)
+    if m.tourney then return "Weekly Tournament" end
+    local st = C.Catalog.stage(tonumber(m.stage) or 0)
+    local kindName = m.manual and "Selected Stage" or GUI.KIND_NAME[GUI.modeKind(m)]
+    return string.format("%s · %s · %.0f%% win · worth ≈%.0f gems/min", st and st.name or ("stage " .. tostring(m.stage)),
+        kindName, (m.p or 0) * 100, m.value or 0)
+end
+-- a brain record key ("ch:5", "inf:21", "pt:27", "tr", "st:3") as a readable name
+function GUI.recordName(key)
+    if key == "tr" then return "🥇 Tournament" end
+    local kind, id = key:match("^(%a+):(%d+)$")
+    local st = id and C.Catalog.stage(tonumber(id))
+    local name = st and st.name or key
+    local tag = ({ ch = "🏆 ", inf = "♾️ ", pt = "🌀 ", st = "⚔️ " })[kind or ""] or ""
+    return tag .. name
+end
+function GUI.updateTabs()
+    local COL = GUI.COL or {}
+    local p = B.prof or {}
+    local items = p.items or {}
+    if GUI.normalCard then
+        local m, note = C.MODE.selectedNormal(p)
+        local st = m and C.Catalog.stage(m.stage)
+        local title = CFG.normalLoop and "Selected Stage Loop · ACTIVE" or "Selected Stage Loop · OFF"
+        local text = note or "Pick a World and Act"
+        local sub = CFG.normalLoop
+            and "This exact normal stage overrides the planner and replays forever"
+            or "Enable the loop to force this stage; Smart Planner is currently free to choose"
+        pcall(GUI.normalCard.Set, {
+            icon = "⚔️", title = title, text = text, sub = sub,
+            tag = m and ("Stage " .. tostring(m.stage)) or "unavailable",
+            tagColor = CFG.normalLoop and COL.green or COL.sub,
+            progress = false,
+            color = CFG.normalLoop and COL.green or COL.accent,
+        })
+    end
+    if GUI.challengeCard then
+        local okC, chs = pcall(C.Catalog.challengesAt, os.time())
+        local active, firstLeft, rows = 0, 0, {}
+        for _, ch in ipairs(okC and type(chs) == "table" and chs or {}) do
+            if C.Catalog.unlocked(p, ch.stage) then
+                active = active + 1
+                local okW, won = pcall(C.Catalog.challengeWon, p, ch.id)
+                won = okW and won == true
+                if not won then firstLeft = firstLeft + 1 end
+                local st = C.Catalog.stage(ch.stage)
+                rows[#rows + 1] = string.format("%s%s", st and st.name or ("Stage " .. tostring(ch.stage)), won and " ✓" or " ★")
+            end
+        end
+        local modeName = ({ [1] = "First wins only", [2] = "Keep farming", [3] = "Endless loop" })[tonumber(CFG.challengeMode) or 3]
+        local title
+        if not CFG.challenges then title = "Challenge Farm · OFF"
+        elseif active == 0 then title = "Dungeon Train · no unlocked cars"
+        elseif firstLeft > 0 then title = string.format("Dungeon Train · %d first win%s left", firstLeft, firstLeft == 1 and "" or "s")
+        else title = "Dungeon Train · repeat farming ready" end
+        pcall(GUI.challengeCard.Set, {
+            icon = "🏆", title = title,
+            text = #rows > 0 and table.concat(rows, "  •  ") or "Waiting for challenge data",
+            sub = string.format("%s · ★ first-win bonus · ✓ repeat reward", modeName or "Challenge mode"),
+            tag = tostring(active) .. " cars", tagColor = firstLeft > 0 and COL.gold or COL.purple,
+            progress = active > 0 and (active - firstLeft) / active or false,
+            color = firstLeft > 0 and COL.gold or COL.purple,
+        })
+    end
+    if GUI.lobbyTiles then
+        local g = GUI.lobbyTiles
+        pcall(g.Set, "Gems", U.fmt(p.gems), string.format("summons keep %s · stats keep %s", U.fmt(CFG.gemReserve), U.fmt(CFG.statGemFloor)), nil, nil)
+        local cr = tonumber(items.crystal) or 0
+        pcall(g.Set, "Trait Crystals", tostring(cr), B.globChasing and "Oh My Glob chase running!" or string.format("Oh My Glob chase at %d", CFG.globChaseAt), COL.gold, cr / math.max(1, CFG.globChaseAt))
+        pcall(g.Set, "Juice", tostring(items.statroll or 0), "Units of Juice for stat rerolls", nil, nil)
+        local okI, cnt, max = pcall(function() return C.Catalog.unitCount(p), C.Catalog.inventoryMax(p) end)
+        if okI then pcall(g.Set, "Storage", string.format("%d / %d", cnt, max), "heroes in the backpack", cnt >= max and COL.red or nil, cnt / math.max(1, max)) end
+        local focus
+        for _, e in ipairs(C.EVO.list(p)) do if e.focus then focus = e end end
+        local fdef = C.Catalog.EVOLUTIONS and C.Catalog.EVOLUTIONS[CFG.evoFocus or ""]
+        local fname = (C.Catalog.UNITS[CFG.evoFocus or ""] or {}).name or tostring(CFG.evoFocus)
+        if focus then pcall(g.Set, "Evolve Focus", fname, string.format("items %.0f%%%s", focus.progress * 100, focus.ready and " · ready!" or ""), focus.ready and COL.green or COL.purple, focus.progress)
+        elseif C.M.ownsAny({ CFG.evoFocus }) then pcall(g.Set, "Evolve Focus", fname, "done ✓", COL.green, 1)
+        else pcall(g.Set, "Evolve Focus", fname, fdef and ("needs " .. ((C.Catalog.UNITS[fdef.from] or {}).name or fdef.from) .. " first") or "", COL.sub, nil) end
+        local ch = B.statChase
+        local cu = ch and p.units and p.units[ch.id]
+        pcall(g.Set, "Stat Chase", cu and ((C.Catalog.UNITS[cu.kind] or {}).name or cu.kind) or "idle",
+            cu and string.format("%s → grade %d+", ch.stat == "dmg" and "damage" or "attack speed", CFG.statGoal) or "team DMG/SPA at goal", nil, nil)
+    end
+    if GUI.rank then
+        local list = C.MODE.lastScored or {}
+        for i = 1, 6 do
+            local m = list[i]
+            if m then
+                pcall(GUI.rank.Set, "#" .. i, GUI.plainMode(m) .. "\n" .. C.MODE.purpose(m), i == 1 and COL.green or (m.tier or 0) >= 3 and COL.text or COL.sub)
+            else
+                pcall(GUI.rank.Set, "#" .. i, i == 1 and "no ranking yet (made in the lobby or at the end of a run)" or "", COL.sub, i == 1 and "#1" or "")
+            end
+        end
+    end
+    if GUI.records then
+        local rows = {}
+        for key, s in pairs(B.stages) do if (s.runs or 0) > 0 then table.insert(rows, { key = key, s = s }) end end
+        table.sort(rows, function(a, b) return (a.s.runs or 0) > (b.s.runs or 0) end)
+        for i = 1, 8 do
+            local r = rows[i]
+            if r then
+                local w, n = r.s.wins or 0, r.s.runs or 0
+                local sec = tonumber(r.s.sec) or 0
+                pcall(GUI.records.Set, tostring(i), string.format("%d of %d won · avg %d:%02d", w, n, sec // 60, math.floor(sec % 60)),
+                    w == n and COL.green or (w / n >= 0.8 and COL.orange or COL.red), GUI.recordName(r.key))
+            else
+                pcall(GUI.records.Set, tostring(i), "", nil, "")
+            end
+        end
+    end
+    if GUI.learn then
+        -- team heroes first, then the most-measured others
+        local kinds, seen = {}, {}
+        for _, id in ipairs(p.slots or {}) do
+            local u = p.units and p.units[id]
+            if u and not seen[u.kind] then table.insert(kinds, u.kind); seen[u.kind] = true end
+        end
+        local others = {}
+        for k, v in pairs(B.kinds) do if not seen[k] then table.insert(others, { k = k, n = v.n or 0 }) end end
+        table.sort(others, function(a, b) return a.n > b.n end)
+        for _, o in ipairs(others) do table.insert(kinds, o.k) end
+        for i = 1, 8 do
+            local k = kinds[i]
+            local v = k and B.kinds[k]
+            if k then
+                local eff = C.M.kindEff(k)
+                local verdict = not v and "not measured yet" or (eff >= 1.15 and "hits harder than its stats say") or (eff <= 0.85 and "hits weaker than its stats say") or "about as its stats say"
+                pcall(GUI.learn.Set, "u" .. i, v and string.format("×%.2f · %s (%d waves)", eff, verdict, v.n or 0) or verdict,
+                    not v and COL.sub or (eff >= 1.15 and COL.green or (eff <= 0.85 and COL.orange or COL.text)),
+                    ((C.Catalog.UNITS[k] or {}).name or k) .. (seen[k] and " ★" or ""))
+            else
+                pcall(GUI.learn.Set, "u" .. i, "", nil, "")
+            end
+        end
+    end
+end
+function GUI.updateMain()
+    local COL = GUI.COL or {}
+    local p = B.prof or {}
+    local items = p.items or {}
+    -- Now
+    if GUI.nowCard then
+        local o
+        if not CFG.master then
+            o = { icon = "⏸", title = "Paused", text = "Turn Smart Farm on to resume", sub = "", tag = "", progress = false, color = COL.sub }
+        elseif SF.where == "match" then
+            local m = GUI.currentMode()
+            local kind = GUI.modeKind(m)
+            local st = C.Catalog.stage(tonumber(m.stage) or 0)
+            local name = MT.tourney and "Weekly Tournament" or (st and st.name or ("stage " .. tostring(m.stage)))
+            local maxLives = (st and st.lives or 10) * ((MT.mods and MT.mods.lives) or 1)
+            local lf = (tonumber(MT.lives) or 0) / math.max(1, maxLives)
+            local prog = false
+            local endless = m.infinite or MT.infinite or MT.tourney or not (tonumber(MT.waves) and MT.waves > 0)
+            if MT.tourney then prog = (os.time() - (MT.runStart or os.time())) / ((C.Catalog.TOURNEY and C.Catalog.TOURNEY.length) or 600)
+            elseif not endless then prog = (tonumber(MT.wave) or 0) / MT.waves end
+            o = {
+                icon = GUI.ICONS[kind], title = GUI.KIND_NAME[kind] .. " · " .. name,
+                text = C.MODE.purpose(m),
+                sub = string.format("Wave %s%s · $%s · %d enemies · %s", tostring(MT.wave or 0), endless and "" or ("/" .. tostring(MT.waves)),
+                    U.fmt(MT.money), MT.alive or MT.enemies or 0, MT.over and ((MT.won and "WON" or "LOST") .. " — deciding what's next") or tostring(ST.Economy or "")),
+                tag = string.format("♥ %s", tostring(MT.lives or "?")),
+                tagColor = lf >= 0.75 and COL.green or (lf >= 0.4 and COL.orange or COL.red),
+                progress = prog, color = kind == "challenge" and COL.gold or (kind == "portal" or kind == "infinite") and COL.purple or COL.accent,
+            }
+        else
+            local last = LOG.lines[#LOG.lines] or ""
+            o = { icon = "🏰", title = "In the lobby", text = tostring(ST.Mode or "planning the next run"),
+                sub = (last:gsub("^%[[%d:]+%]%s*", "")), tag = "", progress = false, color = COL.accent }
+        end
+        pcall(GUI.nowCard.Set, o)
+        pcall(function() GUI.Win:Status((o.icon or "") .. " " .. tostring(o.title), o.tagColor or o.color) end)
+    end
+    -- Up next + last result
+    if GUI.nextCard then
+        -- the ranking is made when a run ends / in the lobby; right after a (re)load there is none yet
+        if not C.MODE.lastTop and os.clock() - (GUI.pickAt or 0) > 15 and B.prof and B.prof.units then
+            GUI.pickAt = os.clock()
+            pcall(C.MODE.pick, B.prof)
+        end
+        local top = C.MODE.lastScored and C.MODE.lastScored[1]
+        local nextTxt = top and GUI.plainMode(top) or "deciding…"
+        local lr = B.lastResult
+        local got = {}
+        if lr and type(lr.items) == "table" then
+            for k, n in pairs(lr.items) do
+                local it = C.Catalog.ITEMS and C.Catalog.ITEMS[k]
+                table.insert(got, string.format("%s×%s", it and it.name or k, tostring(n)))
+            end
+        end
+        if lr and tonumber(lr.gems) then table.insert(got, 1, lr.gems .. " gems") end
+        pcall(GUI.nextCard.Set, {
+            icon = "⏭", title = "Up next: " .. nextTxt:gsub("%s+$", ""),
+            text = C.MODE.raidGate and ("🎃 " .. C.MODE.raidGate) or "",
+            sub = lr and ("Last run: " .. lr.text .. (#got > 0 and (" · " .. table.concat(got, ", ")) or "")) or "",
+            tag = lr and (lr.won and "WON" or "LOST") or "", tagColor = lr and (lr.won and COL.green or COL.red) or nil,
+        })
+    end
+    -- Goals
+    if GUI.goals then
+        local g = GUI.goals
+        local ownsLich = C.M.ownsAny({ "JakeTheLich" }) and "Lich Dog" or (C.M.ownsAny({ "Lich" }) and "Lich Lord")
+        local lairWins = 0
+        for key, s in pairs(B.stages) do if key:sub(1, 3) == "pt:" then lairWins = lairWins + (s.wins or 0) end end
+        if ownsLich then pcall(g.Set, "Lich Lord", "owned ✓", ownsLich, COL.green, 1)
+        else pcall(g.Set, "Lich Lord", "hunting", string.format("%d Lair wins · 5%% each", lairWins), COL.purple, nil) end
+        local cr = tonumber(items.crystal) or 0
+        local glob = B.globChasing and "chasing now!" or string.format("crystals · chase at %d", CFG.globChaseAt)
+        pcall(g.Set, "Oh My Glob", string.format("%d / %d", cr, CFG.globChaseAt), glob, cr >= CFG.globChaseAt and COL.green or COL.gold, cr / math.max(1, CFG.globChaseAt))
+        -- raid readiness in plain words: how much stronger enemies could be and we'd still win
+        local rs = B.raidSim
+        local mg = rs and tonumber(rs.margin) or 0
+        local need = math.floor((CFG.raidMinMargin - 1) * 100 + 0.5)
+        local raidV, raidS
+        if not rs then raidV, raidS = "untested", B.raidSimNote and B.raidSimNote.text or "simulator runs in a match"
+        elseif mg >= CFG.raidMinMargin then raidV, raidS = "Ready ✓", string.format("%d%% to spare · %s keys", math.floor((mg - 1) * 100 + 0.5), tostring(items.raidkey or 0))
+        elseif mg >= 1 then raidV, raidS = "Not ready", string.format("only just wins · needs %d%% to spare", need)
+        else raidV, raidS = "Too weak", string.format("would lose · %s keys saved", tostring(items.raidkey or 0)) end
+        pcall(g.Set, "Raid", raidV, raidS, mg >= CFG.raidMinMargin and COL.green or COL.orange, math.clamp((mg - 0.5) / math.max(0.01, CFG.raidMinMargin - 0.5), 0, 1))
+        pcall(g.Set, "Gems", U.fmt(p.gems), tostring(ST.Summon or ""):find("holding") and "summons held (all owned)" or "", nil, nil)
+        pcall(g.Set, "Lich Portals", tostring(items.lichportal or 0), "each = 1 Lair run", (tonumber(items.lichportal) or 0) > 0 and COL.purple or nil, nil)
+        pcall(g.Set, "Team Power", U.fmt(C.MODE.teamPower(p)), string.format("%d wins · %d losses", B.totals.wins or 0, B.totals.losses or 0), nil, nil)
+    end
+    -- Systems
+    if GUI.systems then
+        for _, k in ipairs(GUI.SYSTEMS) do
+            local v = ST[k]
+            -- shorthand from the battle maths → words
+            local s = tostring(v or "—"):gsub("%(([%d%.]+) dps/%$", "(+%1 damage per coin"):gsub("dps/%$", "damage per coin")
+            local col = (s:find("refused") or s:find("error")) and COL.red or (v and COL.text or COL.sub)
+            pcall(GUI.systems.Set, k, s, col)
+        end
+    end
+end
+function GUI.loop()
+    local LIVE = GUI.LIVE
+    pcall(HUB.traitBackfill)
+    while SF.alive do
+        pcall(GUI.updateMain)
+        pcall(GUI.updateTabs)
+        for k, w in pairs(LIVE) do
+            if ST[k] then pcall(w.Set, k .. ": " .. ST[k]) end
+        end
+        if LIVE.log then pcall(LIVE.log.Set, table.concat({ table.unpack(LOG.lines, math.max(1, #LOG.lines - 14)) }, "\n")) end
+        if LIVE.totals then
+            local t = B.totals
+            pcall(LIVE.totals.Set, string.format("matches %d · wins %d · losses %d · summons %d · feeds %d · rerolls %d", B.matches, t.wins, t.losses, t.summons, t.feeds, t.rerolls))
+        end
+        if LIVE.kinds then
+            local rows = {}
+            for kind, v in pairs(B.kinds) do table.insert(rows, string.format("%s: x%.2f (raw %.2f, %d waves)", kind, C.M.kindEff(kind), v.eff, v.n or 0)) end
+            table.sort(rows)
+            pcall(LIVE.kinds.Set, #rows > 0 and table.concat(rows, "\n") or "no measurements yet")
+        end
+        if LIVE.traitLog then pcall(LIVE.traitLog.Set, HUB.traitText()) end
+        if LIVE.modes then
+            local rows = {}
+            for key, s in pairs(B.stages) do table.insert(rows, string.format("%s: %d/%d wins · %.0fs", key, s.wins or 0, s.runs or 0, s.sec or 0)) end
+            table.sort(rows)
+            pcall(LIVE.modes.Set, #rows > 0 and table.concat(rows, "\n") or "no runs yet")
+        end
+        task.wait(1)
+    end
+end
+
+-- ============================================================
+--  OPT-IN ANONYMOUS STATS REPORT
+-- ============================================================
+-- Off unless the player turns on Settings → "Share anonymous stats". Game stats only — never the Roblox
+-- name or user id: an anonymous id (a hash, so reports from one player can be grouped), version,
+-- per-mode records, team, learned efficiency, raid sim result, key items and logged problems.
+SF.REPORT = {}
+-- random per install (a hash of the user id could be reversed by trying every id)
+function SF.REPORT.anonId() return B.anonId end
+function SF.REPORT.build()
+    local p = B.prof or {}
+    local team = {}
+    for _, id in ipairs(p.slots or {}) do
+        local u = p.units and p.units[id]
+        if u then table.insert(team, string.format("%s L%s %s %s", u.kind, tostring(u.level), tostring(u.trait or "-"), tostring(u.g or ""))) end
+    end
+    local modes = {}
+    for key, s in pairs(B.stages) do
+        if (s.runs or 0) > 0 then table.insert(modes, { key, s.wins or 0, s.runs or 0, math.floor(tonumber(s.sec) or 0) }) end
+    end
+    table.sort(modes, function(a, b) return a[3] > b[3] end)
+    while #modes > 25 do table.remove(modes) end
+    local learn = {}
+    for k, v in pairs(B.kinds) do learn[k] = { math.floor((v.eff or 0) * 100) / 100, v.n or 0 } end
+    local it = p.items or {}
+    local problems = {}
+    for i, l in ipairs(LOG.problems or {}) do problems[i] = l end
+    return {
+        id = SF.REPORT.anonId(), v = VERSION, cfgv = CFG.cfgv, where = SF.where,
+        totals = { wins = B.totals.wins, losses = B.totals.losses, matches = B.matches, summons = B.totals.summons },
+        power = math.floor(C.MODE.teamPower(p)), team = team, modes = modes, learn = learn,
+        raid = B.raidSim and { math.floor((tonumber(B.raidSim.margin) or 0) * 100) / 100, B.raidSim.wave } or nil,
+        -- why raids are or aren't running: the simulator's last outcome (minutes ago) and the gate in plain words
+        raidSim = B.raidSimNote and { B.raidSimNote.text, math.floor((os.time() - (tonumber(B.raidSimNote.at) or os.time())) / 60) } or "never ran",
+        raidGate = C.MODE.raidGate,
+        mode = ST.Mode, next = C.MODE.lastTop and tostring(C.MODE.lastTop):sub(1, 200) or nil,
+        items = { crystal = it.crystal, lichportal = it.lichportal, raidkey = it.raidkey, gems = p.gems },
+        settings = { goal = CFG.goal, lichHunt = CFG.lichHunt, evoFocus = CFG.evoFocus, raids = CFG.raids, raidMinMargin = CFG.raidMinMargin, infKeys = CFG.infKeys },
+        -- save-file health: what the last load found (bytes, decoded, records inside), loads so far, Reset presses
+        brain = { load = SF.brainLoad, loads = B.loads, stages = U.count(B.stages), kinds = U.count(B.kinds),
+            resets = #B.resets > 0 and B.resets or nil },
+        problems = problems,
+    }
+end
+-- one Discord embed with a JSON block (an embed holds 4096 characters; callers keep json under ~3900)
+function SF.REPORT.post(title, json, color)
+    return SF.REPORT.postEmbed(title, "```json\n" .. json .. "\n```", color)
+end
+-- one embed to the author's webhook; mentions are switched off (nothing in it can ping anyone)
+function SF.REPORT.postEmbed(title, description, color)
+    if C.WEBHOOK_URL == "" then return false, "no webhook set by the author" end
+    local req = (syn and syn.request) or http_request or request or (fluxus and fluxus.request)
+    if not req then return false, "this executor can't send web requests" end
+    local body = U.json({ username = "Smart Farm reports", allowed_mentions = { parse = {} }, embeds = { {
+        title = title, description = description, color = color or 8556792 } } })
+    local ok, res = pcall(req, { Url = C.WEBHOOK_URL, Method = "POST", Headers = { ["Content-Type"] = "application/json" }, Body = body })
+    local code = ok and type(res) == "table" and tonumber(res.StatusCode or res.Status) or nil
+    if ok and (not code or code < 300) then return true end
+    return false, tostring(ok and code or res)
+end
+-- a player's idea for the farm (Updates tab → Suggest): anonymous (the random install id, no Roblox name),
+-- one every 10 minutes, at most 500 characters, links and @-mentions taken out. Works with sharing off: it's
+-- something the player chose to send
+SF.SUGGEST_GAP = 600
+function SF.REPORT.suggest(text)
+    text = tostring(text or ""):gsub("^%s+", ""):gsub("%s+$", "")
+    if #text < 5 then return false, "write a few words first" end
+    local wait = SF.SUGGEST_GAP - (os.time() - (tonumber(B.lastSuggest) or 0))
+    if wait > 0 then return false, string.format("you can send another in %d min", math.ceil(wait / 60)) end
+    text = text:gsub("https?://%S+", "[link]"):gsub("www%.%S+", "[link]"):gsub("@", "＠"):gsub("`", "'")
+    if #text > 500 then text = text:sub(1, 500) .. "…" end
+    local ok, err = SF.REPORT.postEmbed(string.format("💡 Suggestion · %s · v%s", B.anonId, VERSION), text, 16766720)
+    if ok then
+        B.lastSuggest = os.time()
+        SF.saveSoon()
+        SF.log(1, "INFO", "suggestion sent — thank you!")
+    end
+    return ok, err
+end
+function SF.REPORT.send(why)
+    local data = SF.REPORT.build()
+    local json = U.json(data)
+    -- drop the oldest problems, then the rarest modes, until it fits
+    while #json > 3900 and #data.problems > 0 do table.remove(data.problems, 1); json = U.json(data) end
+    while #json > 3900 and #data.modes > 5 do table.remove(data.modes); json = U.json(data) end
+    local ok, err = SF.REPORT.post(string.format("📊 %s · v%s · %s", data.id, VERSION, tostring(why or "report")), json)
+    B.lastReport = os.time()
+    SF.saveSoon()
+    SF.status("Report", ok and ("sent (" .. tostring(why) .. ") at " .. os.date("%H:%M")) or ("send failed: " .. tostring(err)))
+    return ok, err
+end
+
+-- the hive: one compact record per match, sent in batches, so every player's runs teach the scores
+-- (heroes we don't own, placements, run times, win rates). Fields:
+--   k mode key · w won · wv wave · t seconds · mid joined mid-run (time not real) · lv lives left
+--   team {"Kind:level:trait"} · tw placed heroes {kind, level, x, z, damage dealt this match}
+SF.HIVE = {}
+-- what the hive learned (hive.json in the repo): the local copy at once, a fresh one from GitHub when it's
+-- older than 6 hours. Only hero measurements are used so far (C.M.hiveRel → C.M.kindEff)
+function SF.HIVE.load()
+    local cached = U.readJson(C.HIVE_CACHE)
+    if type(cached) == "table" and type(cached.kinds) == "table" then SF.HIVE.data = cached end
+    local age = os.time() - (tonumber(cached and cached.fetched) or 0)
+    if CFG.useHive and age > 6 * 3600 then
+        local ok, raw = pcall(game.HttpGet, game, C.HIVE_URL)
+        local okJ, d = pcall(function() return ok and Http:JSONDecode(raw) end)
+        if okJ and type(d) == "table" and type(d.kinds) == "table" then
+            d.fetched = os.time()
+            SF.HIVE.data = d
+            pcall(U.writeJson, C.HIVE_CACHE, d)
+        elseif not SF.HIVE.data then
+            return SF.status("Hive", "couldn't fetch the hive: " .. tostring(ok and "bad file" or raw):sub(1, 120))
+        end
+    end
+    local d = SF.HIVE.data
+    if not d then return SF.status("Hive", "no hive data yet") end
+    local used = 0
+    for kind in pairs(d.kinds) do if C.M.hiveRel(kind) then used = used + 1 end end
+    SF.status("Hive", string.format("%s · %d heroes from %s players (%s matches) · updated %s", CFG.useHive and "learning from it" or "off",
+        used, tostring(d.players or "?"), tostring(d.matchRecords or "?"), os.date("%d %b %H:%M", tonumber(d.updated) or 0)))
+end
+function SF.HIVE.record(key, sec)
+    if not CFG.shareStats then return end
+    local info = MT.info or {}
+    local team = {}
+    for _, k in ipairs(info.slots or {}) do
+        table.insert(team, string.format("%s:%s:%s", k, tostring(info.levels and info.levels[k] or "?"), tostring(info.traits and info.traits[k] or "-")))
+    end
+    local tw = {}
+    local W = MT.W() -- towers are in world studs; record map spots (as MT.spots and the log use)
+    for id, t in pairs(MT.towers or {}) do
+        if MT.mine(t) then
+            table.insert(tw, { t.kind, t.level or 1, math.floor((t.x or 0) / W + 0.5), math.floor((t.z or 0) / W + 0.5), math.floor(tonumber(MT.dmg[id]) or 0) })
+        end
+    end
+    table.insert(B.hiveQueue, { k = key, w = MT.won and 1 or 0, wv = MT.wave, t = sec, mid = MT.joinedMidRun and 1 or nil,
+        lv = MT.lives, team = team, tw = tw, at = os.time(), sc = MT.tourney and MT.tourneyScore or nil,
+        st = MT.tourney and B.tourneySim and B.tourneySim.strat or nil })
+    while #B.hiveQueue > 30 do table.remove(B.hiveQueue, 1) end
+end
+-- send what fits in one message (oldest first); a failed send keeps the records for next time
+function SF.HIVE.flush(force)
+    local q = B.hiveQueue
+    if not CFG.shareStats or #q == 0 then return end
+    if not force and #q < CFG.shareBatch and os.time() - (tonumber(B.lastHive) or 0) < 1200 then return end
+    local pack = {}
+    local head = { id = B.anonId, v = VERSION, xy = "map", m = pack }
+    for i = 1, #q do
+        table.insert(pack, q[i])
+        if #U.json(head) > 3900 then table.remove(pack); break end
+    end
+    if #pack == 0 then table.remove(q, 1); return end -- one record too big for a message: drop it
+    local ok, err = SF.REPORT.post(string.format("🧠 %s · v%s · %d matches", B.anonId, VERSION, #pack), U.json(head), 5814783)
+    B.lastHive = os.time()
+    if ok then
+        for _ = 1, #pack do table.remove(q, 1) end
+        SF.status("Report", string.format("match stats sent (%d) at %s", #pack, os.date("%H:%M")))
+    else
+        SF.status("Report", "match stats not sent yet: " .. tostring(err))
+    end
+    SF.saveSoon()
+end
+task.spawn(function()
+    pcall(SF.HIVE.load)
+    local hiveAt = os.time()
+    while SF.alive do
+        task.wait(60)
+        if os.time() - hiveAt > 6 * 3600 then hiveAt = os.time(); pcall(SF.HIVE.load) end
+        if CFG.shareStats and C.WEBHOOK_URL ~= "" then
+            pcall(SF.HIVE.flush)
+            if os.time() - (tonumber(B.lastReport) or 0) >= CFG.shareEvery * 60 then pcall(SF.REPORT.send, "hourly") end
+        end
+    end
+end)
+
+-- ============================================================
+--  ANTI-AFK · UNLOAD · START
+-- ============================================================
+table.insert(SF.conns, LP.Idled:Connect(function()
+    if not CFG.antiAfk then return end
+    pcall(function()
+        local vu = game:GetService("VirtualUser")
+        vu:CaptureController(); vu:ClickButton2(Vector2.new())
+    end)
+end))
+function SF.unload()
+    SF.alive = false
+    SF.saveNow()
+    for _, c in ipairs(SF.conns) do pcall(function() c:Disconnect() end) end
+    pcall(function() GUI.Win:Destroy() end)
+    pcall(function()
+        for _, g in ipairs(LP.PlayerGui:GetChildren()) do if g.Name:find("^NexusLib_🍬") then g:Destroy() end end
+    end)
+    _G.CKD_SF = nil
+end
+
+-- an older copy (e.g. from a hot reload) stops itself as soon as a newer one owns _G.CKD_SF
+task.spawn(function()
+    while SF.alive do
+        task.wait(1)
+        if _G.CKD_SF ~= SF then
+            SF.alive = false
+            for _, c in ipairs(SF.conns) do pcall(function() c:Disconnect() end) end
+            pcall(function() GUI.Win:Destroy() end)
+        end
+    end
+end)
+
+-- keep running across hub <-> match teleports.  v1.7 reloads only an exact-version cache/source;
+-- it never falls back to the historical public v1.3 URL.
+pcall(function()
+    if not queue_on_teleport or _G.CKD_SF_QUEUED_VERSION == VERSION then return end
+
+    local cached
+    pcall(function()
+        if isfile and isfile(C.SELF_CACHE) then cached = readfile(C.SELF_CACHE) end
+    end)
+    local haveCache = CKD_validSelf(cached)
+    local haveUrl = type(C.SELF_URL) == "string" and C.SELF_URL ~= ""
+
+    if not haveCache and not haveUrl then
+        warn("[CKD] v" .. VERSION .. ": teleport reload not armed — run the v1.7 loadstring loader so the exact source can be cached.")
+        SF.log(0, "RELOAD", "teleport reload not armed (no v" .. VERSION .. " cache or custom URL); refusing old-version fallback")
+        return
+    end
+
+    _G.CKD_SF_QUEUED_VERSION = VERSION
+
+    local qCache = string.format("%q", C.SELF_CACHE)
+    local qUrl = string.format("%q", C.SELF_URL or "")
+    local qVersion = string.format("%q", VERSION)
+
+    local q = "task.wait(0.75) "
+        .. "local CACHE=" .. qCache .. " local URL=" .. qUrl .. " local EXPECT=" .. qVersion .. " "
+        .. "local function ver(s) return type(s)=='string' and s:match('local%s+VERSION%s*=%s*\\\"([^\\\"]+)\\\"') or nil end "
+        .. "local function valid(s) return type(s)=='string' and #s>1000 and ver(s)==EXPECT end "
+        .. "local function cache() local ok,r=pcall(function() return isfile and isfile(CACHE) and readfile(CACHE) or nil end) "
+        .. "if ok and valid(r) then return r end end "
+        .. "local function web() if URL=='' then return nil end local sep=URL:find('?',1,true) and '&' or '?' "
+        .. "local ok,r=pcall(game.HttpGet,game,URL..sep..'ckd='..tostring(os.time())) "
+        .. "if ok and valid(r) then pcall(function() local folder=CACHE:match('^(.*)/[^/]+$') if folder and not isfolder(folder) then makefolder(folder) end writefile(CACHE,r) end) return r end end "
+        .. "local s=cache() or web() "
+        .. "if not s then warn('[CKD] teleport reload refused: no exact v'..EXPECT..' source (prevented downgrade)') return end "
+        .. "pcall(function() if getgenv then getgenv().CKD_SF_URL=(URL~='' and URL or nil); getgenv().CKD_SF_SOURCE=s end end) "
+        .. "_G.CKD_SF_URL=(URL~='' and URL or nil) _G.CKD_SF_SOURCE=s "
+        .. "local fn,e=loadstring(s,'=CKD_SmartFarm_v'..EXPECT) "
+        .. "if fn then fn() else warn('[CKD] teleport compile: '..tostring(e)) end"
+
+    queue_on_teleport(q)
+    SF.log(1, "RELOAD", string.format("teleport reload armed · v%s · %s", VERSION, haveCache and "exact cached source" or "custom URL"))
+end)
+
+SF.C, SF.B, SF.CFG, SF.MT, SF.HUB, SF.ST = C, B, CFG, MT, HUB, ST -- for live inspection
+task.spawn(GUI.build)
+task.spawn(function() task.wait(2); GUI.loop() end)
+SF.log(1, "INFO", "Smart Farm v" .. VERSION .. " started in the " .. SF.where)
+SF.status("Mode", "starting in the " .. SF.where)
+task.spawn(function()
+    local ok, e = pcall(SF.where == "match" and MT.run or HUB.run)
+    if not ok then SF.log(0, "FATAL", tostring(e)); warn("[CKD] " .. tostring(e)) end
+end)
