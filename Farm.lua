@@ -13,10 +13,16 @@
 
 -- claim the "running" slot synchronously, before any yield, so two queued loaders can't both start
 if _G.CKD_SF and _G.CKD_SF.alive then return end
-local VERSION = "1.8"
+local VERSION = "1.8.1"
 -- what changed, newest first (Updates tab; a one-time notice when a player first runs a new version)
 -- items: { icon, title, text, tag = NEW | IMPROVED | FIX }
 local CHANGELOG = {
+    { v = "1.8.1", date = "Oct 31, 2026", title = "Roll Preview Lab", items = {
+        { "🎲", "Next Roll Preview", "Adds a live Trait / Stats / Summon preview panel in the Heroes tab.", "NEW" },
+        { "🔎", "Client RNG probe", "Searches replicated/client-visible tables and values for an actual queued next result before falling back to odds.", "NEW" },
+        { "✅", "No fake predictions", "Exact is shown only when a recognizable next result is exposed client-side; otherwise the panel clearly says the result is hidden.", "IMPROVED" },
+        { "⚡", "Instant result reveal", "The farm records the server's Trait / Stats / Summon result immediately when the request returns, before long UI animations finish.", "NEW" },
+    } },
     { v = "1.8", date = "Oct 30, 2026", title = "Instant Wave Skip", items = {
         { "⚡", "Instant Auto Skip", "Starts the next wave as soon as the current wave has finished spawning instead of waiting four extra seconds.", "NEW" },
         { "🏁", "Faster first wave", "The first wave starts almost immediately after a hero is placed when Instant Auto Skip is enabled.", "IMPROVED" },
@@ -1325,6 +1331,307 @@ function HUB.apply(res)
 end
 function HUB.items(name) return HUB.prof and HUB.prof.items and tonumber(HUB.prof.items[name]) or 0 end
 
+-- ============================================================
+--  ROLL PREVIEW LAB
+--  Best effort only: exact predictions are shown ONLY when the client actually exposes a recognizable
+--  queued/next result. Otherwise this reports the game's real odds / pity and says the result is hidden.
+-- ============================================================
+local RNGP = {
+    exact = {},       -- category -> readable exact candidate
+    exactPath = {},   -- where it was found
+    state = {},       -- seed/rng-like state discovered, but not decoded
+    last = {},        -- actual last server result
+    scannedAt = 0,
+    deepScanned = false,
+}
+SF.RNGP = RNGP
+
+local function rngNorm(v)
+    return tostring(v or ""):lower():gsub("[^%w]", "")
+end
+
+local function rngPathHas(path, words)
+    local p = rngNorm(path)
+    for _, w in ipairs(words) do
+        if p:find(w, 1, true) then return true end
+    end
+    return false
+end
+
+local RNG_WORDS = {
+    trait = { "trait", "rerolltrait" },
+    stats = { "stat", "stats", "grade", "rerollstats", "recondition" },
+    summon = { "summon", "pull", "banner", "gacha" },
+}
+
+local function rngTraitName(id)
+    local t = id and C.Catalog and C.Catalog.TRAITS and C.Catalog.TRAITS[id]
+    return t and (t.name or tostring(id)) or nil
+end
+
+local function rngUnitName(kind)
+    local u = kind and C.Catalog and C.Catalog.UNITS and C.Catalog.UNITS[kind]
+    return u and (u.name or tostring(kind)) or nil
+end
+
+local function rngExtract(cat, v)
+    if cat == "trait" then
+        if type(v) == "string" and C.Catalog.TRAITS and C.Catalog.TRAITS[v] then
+            return rngTraitName(v)
+        end
+        if type(v) == "table" then
+            local id = v.trait or v.id or v.kind or v.value or v[1]
+            if type(id) == "string" and C.Catalog.TRAITS and C.Catalog.TRAITS[id] then
+                return rngTraitName(id)
+            end
+        end
+    elseif cat == "summon" then
+        if type(v) == "string" and C.Catalog.UNITS and C.Catalog.UNITS[v] then
+            return rngUnitName(v)
+        end
+        if type(v) == "table" then
+            local kind = v.kind or (type(v.unit) == "table" and v.unit.kind) or v.hero or v.id or v.value
+            if type(kind) == "string" and C.Catalog.UNITS and C.Catalog.UNITS[kind] then
+                return rngUnitName(kind)
+            end
+            -- a queue often stores the next card at index 1
+            if type(v[1]) ~= "nil" then
+                return rngExtract("summon", v[1])
+            end
+        end
+    elseif cat == "stats" then
+        if C.UnitStats then
+            if type(v) == "string" then
+                local ok, d = pcall(C.UnitStats.decode, v)
+                if ok and type(d) == "table" then
+                    local okT, txt = pcall(C.UnitStats.text, v)
+                    return okT and txt or tostring(v)
+                end
+            elseif type(v) == "table" then
+                local g = v.g or v.grade or v.grades or v.value or v[1]
+                if type(g) == "string" then
+                    local ok, d = pcall(C.UnitStats.decode, g)
+                    if ok and type(d) == "table" then
+                        local okT, txt = pcall(C.UnitStats.text, g)
+                        return okT and txt or tostring(g)
+                    end
+                end
+                if type(v.dmg) == "number" or type(v.spa) == "number" or type(v.range) == "number" then
+                    return string.format("DMG %s · RNG %s · SPA %s",
+                        tostring(v.dmg or "?"), tostring(v.range or "?"), tostring(v.spa or "?"))
+                end
+            end
+        end
+    end
+    return nil
+end
+
+local function rngCheckKey(cat, key, value, path)
+    local nk = rngNorm(key)
+    local hasCat = rngPathHas(nk .. path, RNG_WORDS[cat])
+    local looksNext = nk:find("next", 1, true) or nk:find("pending", 1, true)
+        or nk:find("queued", 1, true) or nk:find("queue", 1, true)
+        or nk:find("preview", 1, true)
+
+    if hasCat and looksNext then
+        local exact = rngExtract(cat, value)
+        if exact then
+            RNGP.exact[cat] = exact
+            RNGP.exactPath[cat] = path .. "." .. tostring(key)
+            return true
+        end
+    end
+
+    -- A seed/state is useful evidence, but NOT enough by itself to claim an exact next result.
+    if hasCat and (nk:find("seed", 1, true) or nk:find("rng", 1, true) or nk:find("random", 1, true)
+        or nk:find("rollindex", 1, true) or nk:find("cursor", 1, true)) then
+        RNGP.state[cat] = path .. "." .. tostring(key)
+    end
+    return false
+end
+
+local function rngScanTable(root, label, maxDepth, budget)
+    if type(root) ~= "table" then return 0 end
+    local seen, found, steps = {}, 0, 0
+    local function walk(t, path, depth)
+        if type(t) ~= "table" or seen[t] or depth > maxDepth or steps >= budget then return end
+        seen[t] = true
+        for k, v in pairs(t) do
+            steps = steps + 1
+            if steps >= budget then break end
+            for _, cat in ipairs({ "trait", "stats", "summon" }) do
+                if not RNGP.exact[cat] and rngCheckKey(cat, k, v, path) then found = found + 1 end
+            end
+            if type(v) == "table" then walk(v, path .. "." .. tostring(k), depth + 1) end
+        end
+    end
+    walk(root, label, 0)
+    return found
+end
+
+local function rngScanInstances()
+    local found, checked = 0, 0
+    local ok, list = pcall(RS.GetDescendants, RS)
+    if not ok or type(list) ~= "table" then return 0 end
+    for _, inst in ipairs(list) do
+        checked = checked + 1
+        if checked > 3500 then break end
+        local name = rngNorm(inst.Name)
+        local full = tostring(inst:GetFullName())
+        for _, cat in ipairs({ "trait", "stats", "summon" }) do
+            if not RNGP.exact[cat] and rngPathHas(name .. full, RNG_WORDS[cat]) then
+                if name:find("next", 1, true) or name:find("pending", 1, true) or name:find("queue", 1, true) then
+                    local value
+                    if inst:IsA("StringValue") or inst:IsA("IntValue") or inst:IsA("NumberValue") then
+                        value = inst.Value
+                    end
+                    local exact = rngExtract(cat, value)
+                    if exact then
+                        RNGP.exact[cat] = exact
+                        RNGP.exactPath[cat] = full
+                        found = found + 1
+                    end
+                elseif name:find("seed", 1, true) or name:find("rng", 1, true) or name:find("random", 1, true) then
+                    RNGP.state[cat] = full
+                end
+            end
+        end
+
+        local okA, attrs = pcall(inst.GetAttributes, inst)
+        if okA and type(attrs) == "table" then
+            for k, v in pairs(attrs) do
+                for _, cat in ipairs({ "trait", "stats", "summon" }) do
+                    if not RNGP.exact[cat] and rngCheckKey(cat, k, v, full .. "._attr") then found = found + 1 end
+                end
+            end
+        end
+    end
+    return found
+end
+
+local function rngScanGC()
+    if type(getgc) ~= "function" then return 0 end
+    local ok, all = pcall(getgc, true)
+    if not ok or type(all) ~= "table" then return 0 end
+    local found, n = 0, 0
+    for _, obj in ipairs(all) do
+        if type(obj) == "table" then
+            n = n + 1
+            if n > 4500 then break end
+            local okS, got = pcall(rngScanTable, obj, "getgc#" .. n, 1, 80)
+            if okS then found = found + (got or 0) end
+            if RNGP.exact.trait and RNGP.exact.stats and RNGP.exact.summon then break end
+        end
+    end
+    return found
+end
+
+function RNGP.scan(deep)
+    RNGP.exact, RNGP.exactPath, RNGP.state = {}, {}, {}
+    local found = 0
+    found = found + rngScanTable(HUB.prof or B.prof or {}, "profile", 4, 2500)
+    found = found + rngScanTable(C.Catalog or {}, "Catalog", 4, 3500)
+    found = found + rngScanTable(C.UnitStats or {}, "UnitStats", 3, 1500)
+    if deep then
+        found = found + rngScanInstances()
+        found = found + rngScanGC()
+        RNGP.deepScanned = true
+    end
+    RNGP.scannedAt = U.now()
+    SF.log(2, "RNG", string.format("roll preview scan%s: %d exact candidate(s)", deep and " (deep)" or "", found))
+    return found
+end
+
+function RNGP.capture(cat, value)
+    RNGP.last[cat] = tostring(value or "?")
+    RNGP.exact[cat], RNGP.exactPath[cat] = nil, nil
+    task.defer(function()
+        pcall(RNGP.scan, false)
+    end)
+end
+
+local function rngPct(p)
+    p = tonumber(p) or 0
+    if p < 0.001 then return string.format("%.3f%%", p * 100) end
+    if p < 0.01 then return string.format("%.2f%%", p * 100) end
+    return string.format("%.1f%%", p * 100)
+end
+
+function RNGP.lines()
+    local p = HUB.prof or B.prof or {}
+    local lines = {}
+
+    -- TRAIT
+    if RNGP.exact.trait then
+        lines.trait = "EXACT CANDIDATE → " .. RNGP.exact.trait .. " · " .. tostring(RNGP.exactPath.trait)
+    else
+        local luck = C.Catalog.traitLuck and C.Catalog.traitLuck(p) or nil
+        local rare = {}
+        for _, id in ipairs(C.Catalog.TRAIT_ORDER or {}) do
+            local def = C.Catalog.TRAITS and C.Catalog.TRAITS[id]
+            local name = def and (def.name or tostring(id)) or tostring(id)
+            local chance = C.Catalog.traitChance and C.Catalog.traitChance(id, luck) or 0
+            if C.M.traitOrder(id) >= 4 then
+                table.insert(rare, { name = name, p = chance })
+            end
+        end
+        table.sort(rare, function(a, b) return a.p > b.p end)
+        local bits = {}
+        for i = 1, math.min(2, #rare) do bits[#bits + 1] = rare[i].name .. " " .. rngPct(rare[i].p) end
+        lines.trait = "Exact next hidden" .. (#bits > 0 and (" · " .. table.concat(bits, " · ")) or "")
+    end
+    if RNGP.last.trait then lines.trait = lines.trait .. " · last: " .. RNGP.last.trait end
+
+    -- STATS
+    if RNGP.exact.stats then
+        lines.stats = "EXACT CANDIDATE → " .. RNGP.exact.stats .. " · " .. tostring(RNGP.exactPath.stats)
+    elseif C.UnitStats and type(C.UnitStats.WEIGHTS) == "table" then
+        local US = C.UnitStats
+        local bestI, bestW, total, hit = nil, -1, 0, 0
+        for i = 1, tonumber(US.N) or #US.WEIGHTS do
+            local w = tonumber(US.WEIGHTS[i]) or 0
+            total = total + w
+            if w > bestW then bestW, bestI = w, i end
+            if i >= (tonumber(CFG.statGoal) or 15) then hit = hit + w end
+        end
+        total = math.max(total, 1)
+        lines.stats = string.format("Exact next hidden · most likely grade %s (%s) · grade %d+ %s",
+            tostring(bestI or "?"), rngPct(bestW / total), tonumber(CFG.statGoal) or 15, rngPct(hit / total))
+    else
+        lines.stats = "Exact next hidden · stat odds table unavailable"
+    end
+    if RNGP.last.stats then lines.stats = lines.stats .. " · last: " .. RNGP.last.stats end
+
+    -- SUMMON
+    if RNGP.exact.summon then
+        lines.summon = "EXACT CANDIDATE → " .. RNGP.exact.summon .. " · " .. tostring(RNGP.exactPath.summon)
+    else
+        local okO, odds = pcall(C.Catalog.summonOdds, os.time(), C.Catalog.summonLuck and C.Catalog.summonLuck(p) or nil)
+        local feat = okO and type(odds) == "table" and odds.featured or "?"
+        local pity = tonumber(p.pity) or 0
+        local cap = tonumber(C.Catalog.SUMMON and C.Catalog.SUMMON.pity) or 0
+        local left = cap > 0 and math.max(0, cap - pity) or nil
+        lines.summon = string.format("Exact next hidden · featured %s · pity %d/%s%s",
+            tostring(feat), pity, cap > 0 and tostring(cap) or "?",
+            left and (" · guarantee in ≤" .. tostring(left)) or "")
+    end
+    if RNGP.last.summon then lines.summon = lines.summon .. " · last: " .. RNGP.last.summon end
+
+    local exactN = (RNGP.exact.trait and 1 or 0) + (RNGP.exact.stats and 1 or 0) + (RNGP.exact.summon and 1 or 0)
+    local stateN = (RNGP.state.trait and 1 or 0) + (RNGP.state.stats and 1 or 0) + (RNGP.state.summon and 1 or 0)
+    if exactN > 0 then
+        lines.detector = string.format("%d exact client-side candidate%s found. Verify one roll before trusting a queue.", exactN, exactN == 1 and "" or "s")
+    elseif stateN > 0 then
+        lines.detector = "RNG/seed-like client state found, but no safe mapping to the next result yet."
+    else
+        lines.detector = RNGP.deepScanned
+            and "No client-visible next-result queue found. Exact rolls are probably generated/kept on the server."
+            or "Quick scan found no exact queue. Press Deep Scan for the strongest client-side check."
+    end
+
+    return lines
+end
+
 -- rewards: daily login, quests, player-level milestones, battle pass
 function HUB.rewards()
     if not CFG.rewards then return SF.status("Rewards", "off") end
@@ -1803,6 +2110,7 @@ function HUB.traits()
             HUB.apply(sel)
         end
         local after = HUB.prof.units[best] and HUB.prof.units[best].trait
+        RNGP.capture("trait", rngTraitName(after) or after or res.trait or "?")
         B.totals.rerolls = B.totals.rerolls + 1
         HUB.traitRecord(u.kind, "single reroll", 1, crystals - HUB.items("crystal"), before, after, C.M.traitValue(after) > C.M.traitValue(before))
         local msg = string.format("%s: %s → %s%s", u.kind, tostring(before or "none"), tostring(after or res.trait or "?"), chasing and " (chasing Epic+)" or "")
@@ -1905,6 +2213,7 @@ function HUB.chaseTrait(id, keep, floor, budget)
             rolls = rolls + 1
             B.totals.rerolls = B.totals.rerolls + 1
             local t = HUB.prof.units[id] and HUB.prof.units[id].trait or res.trait
+            RNGP.capture("trait", rngTraitName(t) or t or "?")
             seen[tostring(t)] = (seen[tostring(t)] or 0) + 1
             if C.M.traitOrder(t) >= keep then
                 local def = C.Catalog.TRAITS[t]
@@ -1975,6 +2284,10 @@ function HUB.stats()
         HUB.apply(res)
         rolls, juice = rolls + 1, juice - cost
         local nu = HUB.prof.units[chase.id]
+        if nu then
+            local okTxt, txt = pcall(US.text, nu.g or "")
+            RNGP.capture("stats", okTxt and txt or tostring(nu.g or "?"))
+        end
         local d = nu and US.decode(nu.g or "")
         if d and (d[chase.stat] or 0) >= goal then
             SF.log(1, "STATS", string.format("%s %s hit grade %d after %d rolls: %s → %s", u.kind, chase.stat, d[chase.stat], rolls, before, US.text(nu.g)))
@@ -2224,6 +2537,7 @@ function HUB.summon()
             table.insert(got, kind .. "(" .. tostring(rar):sub(1, 1) .. ")")
         end
         local msg = string.format("%dx for %d gems → %s", n, cost, #got > 0 and table.concat(got, " ") or "ok")
+        RNGP.capture("summon", #got > 0 and table.concat(got, " ") or "ok")
         SF.log(1, "SUMMON", msg)
         SF.status("Summon", msg)
         HUB.busyUntil = U.now() + 2
@@ -4433,6 +4747,19 @@ function GUI.build()
         T:Section("Live")
         GUI.lobbyTiles = T:StatGrid({ "Gems", "Trait Crystals", "Juice", "Storage", "Evolve Focus", "Stat Chase" }, 3)
     end
+
+    T:Section("🎲 Roll Preview Lab")
+    if T.KeyValue then
+        GUI.rollPreview = T:KeyValue({ "Trait", "Stats", "Summon", "Detector" }, 118)
+    else
+        LIVE.rollPreview = T:Paragraph("Scanning client RNG state…")
+    end
+    T:Button("🔎", "Deep Scan Client RNG", "Search replicated values and executor-visible client tables for a real queued next result", function()
+        local found = RNGP.scan(true)
+        notify("Roll Preview", found > 0 and ("found " .. found .. " exact candidate(s)") or "no exact next-result queue found", found > 0 and "success" or "info")
+    end)
+    T:Paragraph("EXACT CANDIDATE only appears when the client exposes a recognizable queued result. If the server keeps RNG private, this shows odds/pity instead of inventing a prediction.")
+
     T:Section("Team & Rewards")
     tog(T, "Auto Rewards", "Daily login, quests, level milestones, battle pass", "rewards")
     tog(T, "Auto Best Team", "6 strongest distinct heroes: stats × trait × grade × measured efficiency × pair passives", "team")
@@ -4673,6 +5000,9 @@ function GUI.build()
     tog(T, "Learn from the hive", "Blend every player's measured hero damage into the scores (most for heroes you've rarely played)", "useHive")
     T:Button("💾", "Save Settings", "Write " .. C.SETTINGS, function() SF.saveNow(); notify("Saved", "settings written", "success") end)
     Win:Status(CFG.master and "▶ Farming" or "⏸ Paused")
+    task.delay(3, function()
+        if SF.alive and SF.where == "hub" then pcall(RNGP.scan, true) end
+    end)
     -- tell every player once that sharing is on, and where to switch it off
     if CFG.shareStats and not CFG.shareNoticed then
         CFG.shareNoticed = true
@@ -4733,6 +5063,24 @@ function GUI.updateTabs()
     local COL = GUI.COL or {}
     local p = B.prof or {}
     local items = p.items or {}
+
+    if SF.where == "hub" and U.now() - (RNGP.scannedAt or 0) > 20 then
+        pcall(RNGP.scan, false)
+    end
+    local rp = RNGP.lines()
+    if GUI.rollPreview then
+        local exactTrait = RNGP.exact.trait ~= nil
+        local exactStats = RNGP.exact.stats ~= nil
+        local exactSummon = RNGP.exact.summon ~= nil
+        pcall(GUI.rollPreview.Set, "Trait", rp.trait, exactTrait and COL.green or COL.sub, "Trait")
+        pcall(GUI.rollPreview.Set, "Stats", rp.stats, exactStats and COL.green or COL.sub, "Stats")
+        pcall(GUI.rollPreview.Set, "Summon", rp.summon, exactSummon and COL.green or COL.sub, "Summon")
+        pcall(GUI.rollPreview.Set, "Detector", rp.detector, (exactTrait or exactStats or exactSummon) and COL.gold or COL.sub, "Detector")
+    elseif LIVE.rollPreview then
+        pcall(LIVE.rollPreview.Set, table.concat({ "Trait: " .. rp.trait, "Stats: " .. rp.stats, "Summon: " .. rp.summon, "Detector: " .. rp.detector }, "
+"))
+    end
+
     if GUI.normalCard then
         local m, note = C.MODE.selectedNormal(p)
         local st = m and C.Catalog.stage(m.stage)
