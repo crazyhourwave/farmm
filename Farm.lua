@@ -1,5 +1,5 @@
 --[[
-    🍬 Candy Kingdom Defense — Smart Farm v1.9.0  (NexusLib)
+    🍬 Candy Kingdom Defense — Smart Farm v1.9.1  (NexusLib)
 
     One script for both places of the game:
       • Lobby (Tree Fort):  rewards → feed → traits/stats → summon → pick the best mode → launch
@@ -13,10 +13,17 @@
 
 -- claim the "running" slot synchronously, before any yield, so two queued loaders can't both start
 if _G.CKD_SF and _G.CKD_SF.alive then return end
-local VERSION = "1.9.0"
+local VERSION = "1.9.1"
 -- what changed, newest first (Updates tab; a one-time notice when a player first runs a new version)
 -- items: { icon, title, text, tag = NEW | IMPROVED | FIX }
 local CHANGELOG = {
+    { v = "1.9.1", date = "Oct 31, 2026", title = "Always-On Auto Skip", items = {
+        { "⚡", "One skip engine for every mode", "Normal stages and Infinite now use the same direct, fast Skip Wave request path.", "FIX" },
+        { "🔁", "Fast retry worker", "A dedicated worker retries roughly every 0.12s until the server accepts the next-wave request.", "NEW" },
+        { "⏱️", "Timer-triggered retries", "Changes to the game's WaveNextAt countdown immediately wake the skip engine instead of waiting for the combat loop.", "NEW" },
+        { "🛡️", "No exponential backoff", "A normal server 'not ready yet' response no longer slows later Skip Wave attempts.", "FIX" },
+        { "🔌", "Remote self-healing", "If the Act remote changes or disappears, Smart Farm reacquires it automatically.", "FIX" },
+    } },
     { v = "1.9.0", date = "Oct 31, 2026", title = "Complete Menu Revamp", items = {
         { "✨", "New control-center design", "Rebuilt the entire Smart Farm interface with a wider shell, layered surfaces, stronger hierarchy and cleaner spacing.", "NEW" },
         { "🎞️", "Animated interface", "Tabs slide in, cards lift on hover, notifications pop smoothly, the window eases in and the live status indicator pulses.", "NEW" },
@@ -250,8 +257,8 @@ C.DEFAULTS = {
     hubEvery = 8,              -- go back to the lobby at least every N matches (banks feed / candy / rerolls)
     -- battle
     battle = true, place = true, upgrade = true, abilities = true, autoStart = true,
-    instantSkip = true,        -- request the next wave immediately once the current wave is fully spawned
-    instantSkipRetry = 0.35,   -- minimum time between accepted/attempted skip checks
+    instantSkip = true,        -- keep requesting the next wave until the server accepts it
+    instantSkipRetry = 0.12,   -- fast direct retry interval (server still decides when a skip is legal)
     abilityTiming = true,      -- hold a ready ability for a crowd or a boss in its range
     abilityHold = 25,          -- ... but never longer than this many seconds while anything is in range
     earlyCall = true,          -- call the next wave early (measured Oct 2026: Gumdrop Gauntlet ~210s → 130–154s, 0 leaks; some maps keep their clock)
@@ -360,12 +367,13 @@ do
     if (tonumber(saved.cfgv) or 1) < 9 then saved.globRollsPerVisit = nil end
     if (tonumber(saved.cfgv) or 1) < 10 then saved.traitRollsPerVisit = nil; saved.traitChaseTop = nil end
     if (tonumber(saved.cfgv) or 1) < 11 then saved.earlyCall = nil end -- early calls are on by default now
+    if (tonumber(saved.cfgv) or 1) < 13 then saved.instantSkipRetry = nil end -- v1.9.1: faster reliable skip engine
     -- sharing became on by default: only players who never touched the toggle get the new default
     if saved.shareChosen ~= true then saved.shareStats = nil end
     for k, v in pairs(C.DEFAULTS) do
         if saved[k] ~= nil and type(saved[k]) == type(v) then CFG[k] = saved[k] else CFG[k] = v end
     end
-    CFG.cfgv = 12
+    CFG.cfgv = 13
 end
 SF.saveAt = nil
 function SF.saveSoon() SF.saveAt = U.now() + 1.5 end
@@ -3426,76 +3434,93 @@ end
 -- early wave calls: "start" during a wave sends the next one now. Call while the defense is well ahead
 -- (few enemies alive, none far down the road, no leaks this run). How aggressive is learned per stage:
 -- a leak after early calls makes it more careful, a clean win with early calls bolder.
+function MT.waveActRemote()
+    local r = MT._waveActRemote
+    if r and r.Parent then return r end
+    r = C.R("Act")
+    MT._waveActRemote = r
+    return r
+end
+
+-- Low-level equivalent of pressing the game's Start / Skip Wave button.
+-- This deliberately does NOT use SF.request(): a normal "not ready yet" answer must not create
+-- exponential backoff. The server still owns the real cooldown and is free to refuse the request.
+function MT.sendWaveStart(reason)
+    if MT.skipBusy then return nil, "busy" end
+    local remote = MT.waveActRemote()
+    if not remote then
+        MT._waveActRemote = nil
+        return nil, "no Act remote"
+    end
+
+    MT.skipBusy = true
+    local ok, res = pcall(function()
+        if remote:IsA("RemoteFunction") then
+            return remote:InvokeServer("start")
+        end
+        remote:FireServer("start")
+        return { ok = true, fired = true }
+    end)
+    MT.skipBusy = false
+
+    if not ok then
+        -- A stale remote can happen across a match reset. Force a fresh lookup on the next retry.
+        MT._waveActRemote = nil
+        return nil, tostring(res)
+    end
+    if type(res) == "table" and res.ok == false then
+        return res, tostring(res.reason or "not ready")
+    end
+    return res or { ok = true }, nil
+end
+
+function MT.tryInstantSkip(now, reason)
+    if not (CFG.instantSkip and MT.running) or MT.over then return false end
+    if not MT.infinite and MT.waves and MT.wave >= MT.waves then return false end
+
+    -- Even if an old saved setting was slower, reliability mode never waits longer than 0.25s.
+    local retry = math.max(0.08, math.min(0.25, tonumber(CFG.instantSkipRetry) or 0.12))
+    if now - (MT.lastSkipAttemptAt or 0) < retry then return false end
+    MT.lastSkipAttemptAt = now
+
+    local waveAtAttempt = tonumber(MT.wave) or 0
+    local res, err = MT.sendWaveStart(reason or "instant")
+
+    if res and (type(res) ~= "table" or res.ok ~= false) then
+        if MT.skipLoggedWave ~= waveAtAttempt then
+            MT.skipLoggedWave = waveAtAttempt
+            MT.earlyCalls = (MT.earlyCalls or 0) + 1
+            SF.log(2, "WAVES", string.format("instant skip accepted/sent · wave %d → %d · %s",
+                waveAtAttempt, waveAtAttempt + 1, tostring(reason or "worker")))
+        end
+        SF.status("Waves", string.format("⚡ AUTO SKIP armed · wave %d → %d", waveAtAttempt, waveAtAttempt + 1))
+        return true
+    end
+
+    if err ~= "busy" then
+        SF.status("Waves", string.format("⚡ AUTO SKIP retrying · wave %d", waveAtAttempt))
+        if err and err ~= "not ready" then
+            SF.log(2, "WAVES", "skip retry: " .. tostring(err))
+        end
+    end
+    return false
+end
+
 function MT.callWave(now)
     if not MT.running or MT.over then return end
-    if not CFG.instantSkip and not CFG.earlyCall then return end
-    if not MT.infinite and MT.waves and MT.wave >= MT.waves then return end
+
+    -- Reliable Instant Auto Skip is independent of the older safety-based Early Wave Calls.
+    if CFG.instantSkip then
+        MT.tryInstantSkip(now, MT.infinite and "infinite" or "normal")
+        return
+    end
+
+    -- Original conservative mode, kept for players who switch Instant Auto Skip off.
+    if not CFG.earlyCall or MT.infinite then return end
+    if MT.waves and MT.wave >= MT.waves then return end
     if not MT.enemyFolder then return end
 
     local alive, reach = MT.alive or MT.enemies, MT.reachNow or 1
-
-    -- Infinite has its own fast path. Older builds returned above whenever MT.infinite was true,
-    -- so the game's AUTO/countdown handled Infinite by itself and felt slow.
-    -- We repeatedly ask the normal Act("start") action; the server still decides the earliest legal skip.
-    if CFG.instantSkip and MT.infinite then
-        local retry = math.max(0.20, math.min(0.35, tonumber(CFG.instantSkipRetry) or 0.25))
-        if now - (MT.lastInfiniteSkipAt or 0) < retry then return end
-        MT.lastInfiniteSkipAt = now
-
-        local remote = C.R("Act")
-        if not remote then
-            SF.status("Waves", "⚡ Infinite skip · Act remote unavailable")
-            return
-        end
-
-        local ok, res = pcall(function()
-            if remote:IsA("RemoteFunction") then
-                return remote:InvokeServer("start")
-            end
-            remote:FireServer("start")
-            return { ok = true, fired = true }
-        end)
-
-        if ok and (type(res) ~= "table" or res.ok ~= false) then
-            SF.status("Waves", string.format("⚡ Infinite skip request → wave %d", (tonumber(MT.wave) or 0) + 1))
-            SF.log(2, "WAVES", string.format("Infinite instant skip request · wave %s · %d alive", tostring(MT.wave), alive))
-        elseif not ok then
-            SF.log(2, "WAVES", "Infinite skip request error: " .. tostring(res))
-        else
-            SF.status("Waves", "⚡ Infinite skip · waiting for server")
-        end
-        return
-    end
-
-    -- Normal-stage Instant Auto Skip: keep the known-good v1.8 behavior unchanged.
-    if CFG.instantSkip then
-        local retry = math.max(0.20, tonumber(CFG.instantSkipRetry) or 0.35)
-        if now - (MT.lastCallAt or 0) < retry then return end
-
-        -- Do not stack a new wave while the server is still spawning the current one.
-        -- If the game's expected-count signal is missing, wait a tiny moment after the wave event.
-        if MT.waveExpect and MT.waveExpect > 0 then
-            if (MT.waveSpawned or 0) < MT.waveExpect then return end
-        elseif now - (MT.waveStartAt or 0) < 0.35 then
-            return
-        end
-
-        MT.lastCallAt = now
-        local key = "Act:instantSkip:" .. tostring(MT.wave)
-        local res, err = SF.request(key, C.R("Act"), "start")
-
-        if type(res) == "table" and res.ok then
-            MT.earlyCalls = MT.earlyCalls + 1
-            SF.req.back[key] = nil
-            SF.status("Waves", string.format("⚡ instant skip → wave %d (%d enemies alive)", MT.wave + 1, alive))
-            SF.log(2, "WAVES", string.format("instant skip → wave %d · %d alive · front %.2f", MT.wave + 1, alive, reach))
-        elseif err and err ~= "backoff" then
-            SF.status("Waves", "⚡ waiting for server to allow next wave")
-        end
-        return
-    end
-
-    -- Original safety-based early-wave behavior.
     if MT.runLeaks > 0 or now - (MT.waveStartAt or 0) < 4 or now - (MT.lastCallAt or 0) < 4 then return end
     local st = C.Catalog.stage(MT.stage)
     local maxLives = st and math.floor((st.lives or 20) * ((MT.mods and MT.mods.lives) or 1)) or 0
@@ -3795,6 +3820,12 @@ function MT.onEvent(seq, name, d)
         SF.log(1, "BATTLE", string.format("leak! lives %s%s", tostring(MT.lives), MT.earlyCalls > 0 and (" · early calls off, boldness → x" .. string.format("%.2f", MT.aggr)) or ""))
     elseif name == "wave" then
         MT.wave = d.wave or MT.wave; MT.running = true; MT.waveStartAt = U.now(); MT.waveSpawned = 0
+        MT.lastSkipAttemptAt, MT.skipLoggedWave = 0, nil
+        if CFG.instantSkip then
+            task.defer(function()
+                if SF.alive and SF.where == "match" then pcall(MT.tryInstantSkip, U.now(), "wave event") end
+            end)
+        end
         -- expected enemies this wave from the stage's own wave list (× challenge swarm)
         local st = C.Catalog.stage(MT.stage)
         local groups = st and not MT.infinite and C.Catalog.stageWaves(st)[MT.wave]
@@ -3857,7 +3888,8 @@ end
 -- per-run state (a fresh run starts here and after replay / next)
 function MT.resetRun()
     MT.runLeaks, MT.earlyCalls, MT.runReach, MT.waveReach = 0, 0, 0, 0
-    MT.lastInfiniteSkipAt = 0
+    MT.lastSkipAttemptAt, MT.skipLoggedWave, MT.skipBusy = 0, nil, false
+    MT._waveActRemote = nil
     MT.paceSum, MT.paceN, MT.paceLast, MT.paceAt = 0, 0, nil, 0
     MT.cdSum, MT.cdN, MT.spanSum, MT.spanN, MT.cdDue, MT.cdStartAt, MT.spanRaw = 0, 0, 0, 0, nil, nil, {}
     -- WaveNextAt: a wave's start sets a new due time; when it has finished spawning the same due time is set
@@ -3869,6 +3901,11 @@ function MT.resetRun()
             MT.cdConn = mr:GetAttributeChangedSignal("WaveNextAt"):Connect(function()
                 local due = tonumber(mr:GetAttribute("WaveNextAt"))
                 local now = workspace:GetServerTimeNow()
+                if CFG.instantSkip and MT.running and not MT.over then
+                    task.defer(function()
+                        if SF.alive and SF.where == "match" then pcall(MT.tryInstantSkip, U.now(), "WaveNextAt") end
+                    end)
+                end
                 if not due or due < now then return end
                 -- Infinite only sets it when a wave has finished spawning: every change is a gap
                 if MT.infinite then
@@ -4605,6 +4642,19 @@ function MT.run()
     end
     MT.initMap()
     MT.resetRun()
+
+    -- Dedicated reliability worker: does not depend on the 0.25s economy/battle loop.
+    task.spawn(function()
+        while SF.alive and SF.where == "match" and not MT.over do
+            if CFG.master and CFG.battle and CFG.instantSkip then
+                local okSkip, errSkip = pcall(MT.tryInstantSkip, U.now(), "reliability worker")
+                if not okSkip then SF.log(1, "WAVES", "skip worker: " .. tostring(errSkip)) end
+            end
+            local retry = math.max(0.08, math.min(0.20, tonumber(CFG.instantSkipRetry) or 0.12))
+            task.wait(retry)
+        end
+    end)
+
     task.delay(15, function()
         local ok, err = pcall(MT.raidCheck)
         if not ok then
@@ -4656,11 +4706,17 @@ function MT.run()
             local okC, eC = pcall(MT.callWave, t)
             if not okC then SF.log(1, "WAVES", tostring(eC)) end
             if t - lastTgt > 2 then lastTgt = t; pcall(MT.retarget) end
-            local startDelay = CFG.instantSkip and 0.35 or 3
+            local startDelay = CFG.instantSkip and 0.12 or 3
             if CFG.autoStart and not MT.running and MT.enemies == 0 and U.count(MT.towers) > 0 and t - lastStart > startDelay then
                 lastStart = t
-                local key = CFG.instantSkip and "Act:instantStart" or "Act:start"
-                SF.request(key, C.R("Act"), "start")
+                if CFG.instantSkip then
+                    local _, errStart = MT.sendWaveStart("first wave")
+                    if errStart and errStart ~= "busy" and errStart ~= "not ready" then
+                        SF.log(2, "WAVES", "first-wave retry: " .. tostring(errStart))
+                    end
+                else
+                    SF.request("Act:start", C.R("Act"), "start")
+                end
             end
             if t - lastAb > 1 then lastAb = t; pcall(MT.abilities) end
         end
@@ -5390,8 +5446,8 @@ function GUI.build()
     tog(T, "Score Upgrade Attacks", "Rate heroes by their upgraded attacks (area hits, stuns, burns), not just the first one", "scorePath")
     T:Section("WAVE CONTROL")
     tog(T, "Early Wave Calls", "Allow the farm to press the game's Skip Wave / Start action automatically", "earlyCall")
-    tog(T, "⚡ Instant Auto Skip", "Skip as soon as the current wave finishes spawning; the server still decides when the request is accepted", "instantSkip")
-    sld(T, "Instant Retry (s)", "How often the farm may check again if the server is not ready yet", "instantSkipRetry", { min = 0.2, max = 2, step = 0.05, format = f2 })
+    tog(T, "⚡ Reliable Instant Auto Skip", "Always keep Skip Wave armed in Normal + Infinite; retries until the server accepts it", "instantSkip")
+    sld(T, "Instant Retry (s)", "Retry speed for Skip Wave. 0.12s is recommended; the server still controls the legal skip time.", "instantSkipRetry", { min = 0.08, max = 0.5, step = 0.02, format = f2 })
     sld(T, "Call With ≤ Enemies", "Used only when Instant Auto Skip is OFF · × learned boldness", "callAlive", { min = 1, max = 30, step = 1, format = int })
     sld(T, "Call With Front ≤", "Used only when Instant Auto Skip is OFF · furthest enemy allowed down the road", "callReach", { min = 0.1, max = 0.9, step = 0.05, format = pct })
     T:Section("TARGETING & SELLING")
