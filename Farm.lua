@@ -39,7 +39,7 @@ local CHANGELOG = {
         { "✨", "New control-center design", "Rebuilt the entire Smart Farm interface with a wider shell, layered surfaces, stronger hierarchy and cleaner spacing.", "NEW" },
         { "🎞️", "Animated interface", "Tabs slide in, cards lift on hover, notifications pop smoothly, the window eases in and the live status indicator pulses.", "NEW" },
         { "🎨", "Five UI themes", "Midnight Candy, Obsidian Blue, Emerald Glass, Crimson Night and Frosted Violet are available in Settings.", "NEW" },
-        { "🧭", "Cleaner navigation", "Dashboard is now Home, Combat is Battle, Activity is Logs and What's New is Updates.", "IMPROVED" },
+        { "🧭", "Cleaner navigation", "Home is now Home, Battle is Battle, Logs is Logs and What's New is Updates.", "IMPROVED" },
         { "🪟", "Live command header", "Every page now has a top command bar showing the active section and whether Smart Farm is in Lobby or Match.", "NEW" },
         { "🔎", "Polished controls", "Cards, sidebar tabs, status surfaces, scrollbars and notification toasts now share one consistent visual language.", "IMPROVED" },
     } },
@@ -65,7 +65,7 @@ local CHANGELOG = {
         { "🎲", "Roll Preview preserved", "Trait, Stats and Summon preview/odds information remains available in Heroes.", "IMPROVED" },
     } },
     { v = "1.8.1", date = "Oct 31, 2026", title = "Roll Preview Lab", items = {
-        { "🎲", "Next Roll Preview", "Adds a live Trait / Stats / Summon preview panel in the Heroes tab.", "NEW" },
+        { "🎲", "Next Roll Preview", "Adds a live Trait / Stats / Summon preview panel in the Units page.", "NEW" },
         { "🔎", "Client RNG probe", "Searches replicated/client-visible tables and values for an actual queued next result before falling back to odds.", "NEW" },
         { "✅", "No fake predictions", "Exact is shown only when a recognizable next result is exposed client-side; otherwise the panel clearly says the result is hidden.", "IMPROVED" },
         { "⚡", "Instant result reveal", "The farm records the server's Trait / Stats / Summon result immediately when the request returns, before long UI animations finish.", "NEW" },
@@ -98,7 +98,7 @@ local CHANGELOG = {
         { "🏆", "Challenges keep going", "After the three first-win cars are cleared, Challenge farming can continue on repeat rewards instead of disappearing from the planner.", "FIX" },
         { "🔁", "Smart challenge replay", "If the best next challenge is the one you just cleared, the farm uses Again immediately; when another car still has a first-win bonus it returns to the Train and switches cars.", "NEW" },
         { "🍭", "Candy-themed dashboard", "A wider candy-purple UI, cleaner tab names, stronger section hierarchy and a live Dungeon Train card make the menu easier to scan.", "IMPROVED" },
-        { "🎛️", "Challenge behavior control", "Choose First wins only, Keep farming, or Focus challenges from the Play tab. Focus mode keeps Challenge farming ahead of other repeat modes.", "NEW" },
+        { "🎛️", "Challenge behavior control", "Choose First wins only, Keep farming, or Focus challenges from the Farm page. Focus mode keeps Challenge farming ahead of other repeat modes.", "NEW" },
     } },
     { v = "1.3", date = "Oct 30, 2026", title = "Halloween Banner", items = {
         { "🎃", "Halloween Banner pulls", "Spends Halloween Candy on the event banner while it has heroes you don't own (Marshall Lee, Belly Demon 9% each).", "NEW" },
@@ -5123,12 +5123,37 @@ function GUI.build()
     local pct = function(v) return string.format("%.0f%%", v * 100) end
 
     -- ── Lobby: live resources on top, then one section per system ──
-    T = Win:Tab("🏰", "Heroes")
+    T = Win:Tab("👥", "Units")
     if T.StatGrid then
         T:Section("Live")
         GUI.lobbyTiles = T:StatGrid({ "Gems", "Trait Crystals", "Juice", "Storage", "Evolve Focus", "Stat Chase" }, 3)
     end
 
+    T:Section("REWARDS")
+    tog(T, "Auto Rewards", "Daily login, quests, level milestones, battle pass", "rewards")
+    T:Section("SUMMON & STORAGE")
+    tog(T, "Auto Summon", "Summon whenever gems allow", "summon")
+    tog(T, "Only New Heroes", "Pull only while the banner offers a hero you don't own", "summonOnlyNew")
+    tog(T, "Halloween Banner", "Pull it with Halloween Candy while it has a hero you don't own (keeps candy an evolution needs)", "eventBanner")
+    tog(T, "10-Pulls Only", "Cheaper per pull, with an Epic floor", "summonTen")
+    sld(T, "Gem Reserve", "Never summon below this", "gemReserve", { min = 0, max = 10000, step = 250, format = int })
+    tog(T, "Storage Cleanup", "Delete weak spare copies when the backpack is nearly full (never team, Mythic+, traited)", "cleanup")
+    sld(T, "Clean When Free <", "Start cleaning below this many free slots", "cleanFree", { min = 5, max = 60, step = 5, format = int })
+    sld(T, "Clean Until Free", "Clear spares until this many slots are free", "cleanTo", { min = 10, max = 100, step = 5, format = int })
+    sld(T, "Keep Spare Copies", "Spares kept per hero besides its best copy", "keepCopies", { min = 0, max = 5, step = 1, format = int })
+    T:Section("EVOLUTION")
+    tog(T, "Auto Evolve", "Evolve (crafting first) when the items and gems are in", "evolve")
+    sld(T, "Evolution Item Value", "Gem value of an item an evolution still needs (focus items ×3)", "evoItemValue", { min = 0, max = 400, step = 10, format = int })
+    tog(T, "Get S-Tier Evolutions", "Always evolve into S-tier heroes (Cosmic Dog, The Dark Cloud, Metal Reaper...) and farm their items", "sTierEvolve")
+    tog(T, "Teller's Candy Shop", "Buy the Elder Vampire + 5 Vampire Essence (The Dark Cloud) once 20,000 Halloween Candy is saved", "teller")
+    T:Section("FEED & LEVELING")
+    tog(T, "Auto Feed", "Level promising heroes with candy and spare copies", "feed")
+    UI.fodder = T:Dropdown("Feed Spares Up To", "Rarity of spare copies used as XP food", { "Rare", "Epic", "Legendary" }, CFG.fodderMaxRarity, function(_, _, i) setCfg("fodderMaxRarity", tonumber(i) or 2) end)
+
+    -- ── Play: live route choice first, then Challenge controls and the other modes ──
+    -- ── Stats: all roll systems are grouped here so they are easy to find ──
+    T = Win:Tab("📊", "Stats")
+    T:Section("CURRENT ROLL INFO")
     T:Section("ROLL PREVIEW")
     if T.KeyValue then
         GUI.rollPreview = T:KeyValue({ "Trait", "Stats", "Summon", "Detector" }, 118)
@@ -5148,23 +5173,7 @@ function GUI.build()
     end)
     T:Paragraph("EXACT CANDIDATE only appears when the client exposes a recognizable queued result. If the server keeps RNG private, this shows odds/pity instead of inventing a prediction.")
 
-    T:Section("Team & Rewards")
-    tog(T, "Auto Rewards", "Daily login, quests, level milestones, battle pass", "rewards")
-    T:Section("Summon & Storage")
-    tog(T, "Auto Summon", "Summon whenever gems allow", "summon")
-    tog(T, "Only New Heroes", "Pull only while the banner offers a hero you don't own", "summonOnlyNew")
-    tog(T, "Halloween Banner", "Pull it with Halloween Candy while it has a hero you don't own (keeps candy an evolution needs)", "eventBanner")
-    tog(T, "10-Pulls Only", "Cheaper per pull, with an Epic floor", "summonTen")
-    sld(T, "Gem Reserve", "Never summon below this", "gemReserve", { min = 0, max = 10000, step = 250, format = int })
-    tog(T, "Storage Cleanup", "Delete weak spare copies when the backpack is nearly full (never team, Mythic+, traited)", "cleanup")
-    sld(T, "Clean When Free <", "Start cleaning below this many free slots", "cleanFree", { min = 5, max = 60, step = 5, format = int })
-    sld(T, "Clean Until Free", "Clear spares until this many slots are free", "cleanTo", { min = 10, max = 100, step = 5, format = int })
-    sld(T, "Keep Spare Copies", "Spares kept per hero besides its best copy", "keepCopies", { min = 0, max = 5, step = 1, format = int })
-    T:Section("Evolution")
-    tog(T, "Auto Evolve", "Evolve (crafting first) when the items and gems are in", "evolve")
-    sld(T, "Evolution Item Value", "Gem value of an item an evolution still needs (focus items ×3)", "evoItemValue", { min = 0, max = 400, step = 10, format = int })
-    tog(T, "Get S-Tier Evolutions", "Always evolve into S-tier heroes (Cosmic Dog, The Dark Cloud, Metal Reaper...) and farm their items", "sTierEvolve")
-    tog(T, "Teller's Candy Shop", "Buy the Elder Vampire + 5 Vampire Essence (The Dark Cloud) once 20,000 Halloween Candy is saved", "teller")
+
     T:Section("Traits (Crystals)")
     tog(T, "Auto Trait Reroll", "Reroll the strongest team heroes up to the keep rarity", "traits")
     UI.traitKeep = T:Dropdown("Keep Traits At", "Stop rerolling at this trait rarity", { "Common", "Rare", "Epic", "Legendary", "Mythic" }, CFG.traitKeep, function(_, _, i) setCfg("traitKeep", tonumber(i) or 3) end)
@@ -5182,12 +5191,9 @@ function GUI.build()
     sld(T, "Stat Goal", "Target grade (13 B+ · 14 A- · 15 A)", "statGoal", { min = 12, max = 17, step = 1, format = int })
     sld(T, "Stat Gem Floor", "2-lock rolls cost 100 gems: keep at least this many", "statGemFloor", { min = 0, max = 10000, step = 500, format = int })
     sld(T, "Juice Reserve", "Keep this many Units of Juice", "juiceReserve", { min = 0, max = 100, step = 1, format = int })
-    T:Section("Feed")
-    tog(T, "Auto Feed", "Level promising heroes with candy and spare copies", "feed")
-    UI.fodder = T:Dropdown("Feed Spares Up To", "Rarity of spare copies used as XP food", { "Rare", "Epic", "Legendary" }, CFG.fodderMaxRarity, function(_, _, i) setCfg("fodderMaxRarity", tonumber(i) or 2) end)
 
-    -- ── Play: live route choice first, then Challenge controls and the other modes ──
-    T = Win:Tab("🗺️", "Play")
+
+    T = Win:Tab("🗺️", "Farm")
     if T.StatusCard then
         T:Section("🏆 Dungeon Train")
         GUI.challengeCard = T:StatusCard({ icon = "🏆", title = "Checking challenge cars…", text = "", sub = "" })
@@ -5366,22 +5372,8 @@ function GUI.build()
     end
 
     T = Win:Tab("⚙️", "Settings")
-    T:Section("INTERFACE")
-    UI.uiTheme = T:Dropdown("Theme", "Change the complete Smart Farm color system", {
-        "Midnight Candy", "Obsidian Blue", "Emerald Glass", "Crimson Night", "Frosted Violet"
-    }, tonumber(CFG.uiTheme) or 1, function(_, _, i)
-        i = math.clamp(tonumber(i) or 1, 1, 5)
-        if i == CFG.uiTheme then return end
-        setCfg("uiTheme", i)
-        notify("Interface", "Applying theme…", "info")
-        task.defer(function()
-            pcall(function() if GUI.Win then GUI.Win:Destroy() end end)
-            GUI.UI, GUI.LIVE = {}, {}
-            task.wait()
-            pcall(GUI.build)
-        end)
-    end)
-    UI.uiScale = T:Slider("UI Scale", "Resize the whole control center", {
+    T:Section("LIQUID GLASS INTERFACE")
+    UI.uiScale = T:Slider("UI Scale", "Resize the entire Smart Farm window", {
         min = 0.80, max = 1.20, step = 0.05, default = CFG.uiScale,
         format = function(v) return string.format("%.0f%%", v * 100) end
     }, function(v)
@@ -5390,9 +5382,7 @@ function GUI.build()
             pcall(function() GUI.uiScaleObject.Scale = v end)
         end
     end)
-    tog(T, "UI Animations", "Smooth tab transitions, hover lift and notification motion", "uiAnimations")
-    tog(T, "Accent Glow", "Subtle gradients, pulsing status accent and glass depth", "uiGlow")
-    T:Paragraph("Theme changes rebuild only the menu. Smart Farm automation keeps running.")
+    T:Paragraph("Smart Farm now uses its own native Liquid Glass menu. NexusLib, old themes, glow switches and UI animations are removed.")
 
     T:Section("GENERAL")
     tog(T, "Anti-AFK", "Send an input when Roblox flags you idle", "antiAfk")
@@ -5975,9 +5965,8 @@ function SF.unload()
     for _, c in ipairs(SF.conns) do pcall(function() c:Disconnect() end) end
     pcall(function() GUI.Win:Destroy() end)
     pcall(function()
-        for _, g in ipairs(LP.PlayerGui:GetChildren()) do
-            if g.Name:find("^NexusLib_") and (g.Name:find("CKD") or g.Name:find("CandyKingdom")) then g:Destroy() end
-        end
+        local g = LP.PlayerGui:FindFirstChild("CKD_LiquidGlass")
+        if g then g:Destroy() end
     end)
     _G.CKD_SF = nil
 end
