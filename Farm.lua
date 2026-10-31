@@ -1,5 +1,5 @@
 --[[
-    🍬 Candy Kingdom Defense — Smart Farm v2.0.3  (NexusLib)
+    🍬 Candy Kingdom Defense — Smart Farm v2.0.4  (NexusLib)
 
     One script for both places of the game:
       • Lobby (Tree Fort):  rewards → feed → traits/stats → summon → pick the best mode → launch
@@ -13,10 +13,15 @@
 
 -- claim the "running" slot synchronously, before any yield, so two queued loaders can't both start
 if _G.CKD_SF and _G.CKD_SF.alive then return end
-local VERSION = "2.0.3"
+local VERSION = "2.0.4"
 -- what changed, newest first (Updates tab; a one-time notice when a player first runs a new version)
 -- items: { icon, title, text, tag = NEW | IMPROVED | FIX }
 local CHANGELOG = {
+    { v = "2.0.4", date = "Oct 31, 2026", title = "Deep Client Profile Mirror", items = {
+        { "🧠", "Finds hidden client profile tables", "Uses executor-visible Lua state to locate the profile object CKD keeps in memory during matches.", "NEW" },
+        { "📦", "Live items + gems mirror", "Once found, Gems and known item currencies mirror directly from that table instead of waiting for lobby/result sync.", "NEW" },
+        { "🧪", "Source diagnostics", "The Gems tile now tells you whether the number came from server sync, client table mirror, normal client mirror, or reward tracking.", "NEW" },
+    } },
     { v = "2.0.3", date = "Oct 31, 2026", title = "Live Resource Mirror", items = {
         { "👁️", "Reads match-side resource counters", "Smart Farm now mirrors client-visible Gems, Candy, Big Candy, Halloween Candy, Bug Milk and Trait Crystals during a run.", "NEW" },
         { "🔎", "Multiple live sources", "Checks player attributes, replicated values and resource UI labels instead of depending only on lobby profile remotes.", "NEW" },
@@ -1601,6 +1606,103 @@ function HUB.scanLiveResources()
         return found
     end
     return 0
+end
+
+local function profileScore(t)
+    if type(t) ~= "table" then return 0 end
+    local score = 0
+
+    local gems = rawget(t, "gems")
+    local items = rawget(t, "items")
+    local units = rawget(t, "units")
+    local slots = rawget(t, "slots")
+    local cleared = rawget(t, "cleared")
+
+    if type(gems) == "number" then score += 5 end
+    if type(items) == "table" then
+        score += 6
+        local known = 0
+        for _, k in ipairs({ "candy", "bigcandy", "hwcandy", "raidkey", "crystal", "statroll", "page" }) do
+            if rawget(items, k) ~= nil then known += 1 end
+        end
+        score += known * 2
+    end
+    if type(units) == "table" then score += 4 end
+    if type(slots) == "table" then score += 3 end
+    if type(cleared) == "table" then score += 2 end
+
+    return score
+end
+
+local function mirrorProfileTable(t, source)
+    if type(t) ~= "table" then return false end
+    local score = profileScore(t)
+    if score < 10 then return false end
+
+    B.prof = type(B.prof) == "table" and B.prof or {}
+    if type(rawget(t, "gems")) == "number" then
+        B.prof.gems = rawget(t, "gems")
+    end
+
+    local items = rawget(t, "items")
+    if type(items) == "table" then
+        B.prof.items = type(B.prof.items) == "table" and B.prof.items or {}
+        for _, k in ipairs({ "candy", "bigcandy", "hwcandy", "raidkey", "crystal", "statroll", "page" }) do
+            local v = rawget(items, k)
+            if type(v) == "number" then B.prof.items[k] = v end
+        end
+    end
+
+    B.deepProfileAt = U.now()
+    B.deepProfileSource = tostring(source or "getgc")
+    B.deepProfileScore = score
+    return true
+end
+
+function HUB.deepFindClientProfile(force)
+    if SF.where ~= "match" then return false, "not in match" end
+
+    -- Fast path: keep using the exact table we already discovered.
+    if not force and type(B._deepProfileTable) == "table" and profileScore(B._deepProfileTable) >= 10 then
+        if mirrorProfileTable(B._deepProfileTable, "cached client table") then
+            return true, "cached"
+        end
+    end
+
+    local gc = rawget(_G, "getgc")
+    if type(gc) ~= "function" and getgenv then
+        local ok, env = pcall(getgenv)
+        if ok and type(env) == "table" then gc = rawget(env, "getgc") end
+    end
+    if type(gc) ~= "function" then return false, "getgc unavailable" end
+
+    local ok, objects = pcall(gc, true)
+    if not ok or type(objects) ~= "table" then
+        ok, objects = pcall(gc)
+    end
+    if not ok or type(objects) ~= "table" then return false, "getgc failed" end
+
+    local best, bestScore = nil, 0
+    local checked = 0
+    for _, obj in ipairs(objects) do
+        if type(obj) == "table" then
+            checked += 1
+            local score = profileScore(obj)
+            if score > bestScore then
+                best, bestScore = obj, score
+            end
+        end
+        if checked >= 25000 then break end
+    end
+
+    if best and bestScore >= 10 then
+        B._deepProfileTable = best
+        mirrorProfileTable(best, "deep client table")
+        SF.log(1, "PROFILE", string.format("deep client profile found · score %d · scanned %d tables", bestScore, checked))
+        return true, "found"
+    end
+
+    return false, "no profile-shaped table"
 end
 
 -- ============================================================
@@ -4901,6 +5003,23 @@ function MT.run()
         end
     end)
 
+    -- Deep executor-side profile discovery. This catches tables that never exist as Roblox Instances.
+    task.spawn(function()
+        local nextFullScan = 0
+        while SF.alive and SF.where == "match" and not MT.over do
+            local force = U.now() >= nextFullScan
+            local okDeep, found, why = pcall(function()
+                local ok, reason = HUB.deepFindClientProfile(force)
+                return ok, reason
+            end)
+            if force then nextFullScan = U.now() + 5 end
+            if not okDeep then
+                SF.log(2, "PROFILE", "deep profile scan error: " .. tostring(found))
+            end
+            task.wait(0.75)
+        end
+    end)
+
     task.delay(15, function()
         local ok, err = pcall(MT.raidCheck)
         if not ok then
@@ -5825,9 +5944,13 @@ function GUI.updateTabs()
     local crystals = tonumber(items.crystal) or 0
     if GUI.resourceTiles then
         local exactMatchSync = SF.where == "match" and B.matchProfileSyncAt and (U.now() - B.matchProfileSyncAt) < 10
+        local deepMirrored = SF.where == "match" and B.deepProfileAt and (U.now() - B.deepProfileAt) < 3
         local mirrored = SF.where == "match" and B.liveResourceAt and (U.now() - B.liveResourceAt) < 3
         local gemDesc = SF.where == "match"
-            and (exactMatchSync and "server-synced live" or mirrored and "client-mirrored live" or "reward-tracked live")
+            and (exactMatchSync and "server-synced live"
+                or deepMirrored and "deep client-table live"
+                or mirrored and "client-mirrored live"
+                or "reward-tracked live")
             or "current balance"
         pcall(GUI.resourceTiles.Set, "Gems", U.fmt(gems), gemDesc, COL.gold, nil)
         pcall(GUI.resourceTiles.Set, "Candy", U.fmt(candy), "XP Candy", COL.orange, nil)
