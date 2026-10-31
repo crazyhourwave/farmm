@@ -1,8 +1,8 @@
 --[[
-    🍬 Candy Kingdom Defense — Smart Farm v1.8.2  (NexusLib)
+    🍬 Candy Kingdom Defense — Smart Farm v1.8.3  (NexusLib)
 
     One script for both places of the game:
-      • Lobby (Tree Fort):  rewards → best team → feed → traits/stats → summon → pick the best mode → launch
+      • Lobby (Tree Fort):  rewards → feed → traits/stats → summon → pick the best mode → launch
       • Match:              place units on the best road-coverage spots, buy the best DPS-per-coin action,
                             use abilities, learn each unit's real damage, then replay / next / go home
 
@@ -13,10 +13,15 @@
 
 -- claim the "running" slot synchronously, before any yield, so two queued loaders can't both start
 if _G.CKD_SF and _G.CKD_SF.alive then return end
-local VERSION = "1.8.2"
+local VERSION = "1.8.3"
 -- what changed, newest first (Updates tab; a one-time notice when a player first runs a new version)
 -- items: { icon, title, text, tag = NEW | IMPROVED | FIX }
 local CHANGELOG = {
+    { v = "1.8.3", date = "Oct 31, 2026", title = "Manual Team Control", items = {
+        { "🧍", "Auto Best Team removed", "Smart Farm no longer changes your equipped team automatically.", "FIX" },
+        { "🎛️", "Toggle removed", "Removed the Auto Best Team option from the Lobby menu.", "FIX" },
+        { "🧠", "Planner preserved", "Internal best-team scoring remains available for planning/feed logic without equipping anything.", "IMPROVED" },
+    } },
     { v = "1.8.2", date = "Oct 31, 2026", title = "Roll Preview Startup Fix", items = {
         { "🛠️", "Script loads again", "Fixed a malformed newline string in the Roll Preview UI that could stop the whole Lua file from compiling.", "FIX" },
         { "🪶", "Lightweight startup scan", "Startup only checks safe profile/catalog data. The heavier client-memory scan runs only when you press Deep Scan.", "FIX" },
@@ -166,7 +171,7 @@ C.NEXUS_URL = "https://raw.githubusercontent.com/headshot7535-png/Nexuslib/main/
 C.DEFAULTS = {
     master = true,
     -- lobby
-    rewards = true, team = true, feed = true, traits = true, stats = true, summon = true,
+    rewards = true, feed = true, traits = true, stats = true, summon = true,
     gemReserve = 0,            -- never summon below this
     summonTen = true,          -- 10-pulls only (450 vs 500 + Epic floor)
     summonOnlyNew = true,      -- only summon while the banner can give a hero we don't own (base or evolved form)
@@ -1779,35 +1784,6 @@ function HUB.bestTeam(mult)
     for i = 1, n do slots[i] = chosen[i] and chosen[i].id or "" end
     return slots, chosen
 end
-function HUB.team()
-    if not CFG.team then return SF.status("Team", "off") end
-    local p = HUB.refresh()
-    if not p then return end
-    local slots, list = HUB.bestTeam()
-    local same = true
-    local cur = {}
-    for i = 1, C.Catalog.SLOTS do
-        if (p.slots[i] or "") ~= slots[i] then same = false end
-        cur[slots[i]] = true
-    end
-    local names = {}
-    for i = 1, math.min(6, #list) do names[i] = list[i].u.kind .. " " .. U.fmt(list[i].s) end
-    if same then return SF.status("Team", "best team set · " .. table.concat(names, ", ")) end
-    -- keep order-insensitive: only send if the set differs
-    local setSame = true
-    for i = 1, C.Catalog.SLOTS do if (p.slots[i] or "") ~= "" and not cur[p.slots[i]] then setSame = false end end
-    for id in pairs(cur) do if id ~= "" and not table.find(p.slots, id) then setSame = false end end
-    if setSame then return SF.status("Team", "best team set · " .. table.concat(names, ", ")) end
-    local res, err = SF.request("SetSlots", C.R("SetSlots"), slots)
-    if type(res) == "table" and res.ok then
-        HUB.apply(res)
-        SF.log(1, "TEAM", "equipped " .. table.concat(names, ", "))
-        SF.status("Team", "equipped " .. table.concat(names, ", "))
-    else
-        SF.status("Team", "SetSlots refused: " .. tostring(err))
-    end
-end
-
 -- storage cleanup: a full backpack blocks every summon. Spare copies that can't help are deleted, weakest
 -- first. Never touched: team heroes, locked heroes, the best copy of each kind + CFG.keepCopies spares
 -- (base copies for future evolutions and partners), anything Mythic or Secret, leveled or fed copies,
@@ -4622,7 +4598,6 @@ HUB.SYSTEMS = {
     { name = "Stats", fn = HUB.stats, every = 8 },
     { name = "Tourney", fn = HUB.tourneyFetch, every = 120 },
     -- team last: it sees this visit's summons, feeds and rerolls before the launch
-    { name = "Team", fn = HUB.team, every = 8 },
     { name = "Mode", fn = HUB.play, every = 4, last = true },
 }
 function HUB.run()
@@ -4781,7 +4756,6 @@ function GUI.build()
 
     T:Section("Team & Rewards")
     tog(T, "Auto Rewards", "Daily login, quests, level milestones, battle pass", "rewards")
-    tog(T, "Auto Best Team", "6 strongest distinct heroes: stats × trait × grade × measured efficiency × pair passives", "team")
     T:Section("Summon & Storage")
     tog(T, "Auto Summon", "Summon whenever gems allow", "summon")
     tog(T, "Only New Heroes", "Pull only while the banner offers a hero you don't own", "summonOnlyNew")
