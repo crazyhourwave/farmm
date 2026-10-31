@@ -1,5 +1,5 @@
 --[[
-    🍬 Candy Kingdom Defense — Smart Farm v1.8.5  (NexusLib)
+    🍬 Candy Kingdom Defense — Smart Farm v1.9.0  (NexusLib)
 
     One script for both places of the game:
       • Lobby (Tree Fort):  rewards → feed → traits/stats → summon → pick the best mode → launch
@@ -13,10 +13,18 @@
 
 -- claim the "running" slot synchronously, before any yield, so two queued loaders can't both start
 if _G.CKD_SF and _G.CKD_SF.alive then return end
-local VERSION = "1.8.5"
+local VERSION = "1.9.0"
 -- what changed, newest first (Updates tab; a one-time notice when a player first runs a new version)
 -- items: { icon, title, text, tag = NEW | IMPROVED | FIX }
 local CHANGELOG = {
+    { v = "1.9.0", date = "Oct 31, 2026", title = "Complete Menu Revamp", items = {
+        { "✨", "New control-center design", "Rebuilt the entire Smart Farm interface with a wider shell, layered surfaces, stronger hierarchy and cleaner spacing.", "NEW" },
+        { "🎞️", "Animated interface", "Tabs slide in, cards lift on hover, notifications pop smoothly, the window eases in and the live status indicator pulses.", "NEW" },
+        { "🎨", "Five UI themes", "Midnight Candy, Obsidian Blue, Emerald Glass, Crimson Night and Frosted Violet are available in Settings.", "NEW" },
+        { "🧭", "Cleaner navigation", "Dashboard is now Home, Combat is Battle, Activity is Logs and What's New is Updates.", "IMPROVED" },
+        { "🪟", "Live command header", "Every page now has a top command bar showing the active section and whether Smart Farm is in Lobby or Match.", "NEW" },
+        { "🔎", "Polished controls", "Cards, sidebar tabs, status surfaces, scrollbars and notification toasts now share one consistent visual language.", "IMPROVED" },
+    } },
     { v = "1.8.5", date = "Oct 31, 2026", title = "Infinite Instant Skip", items = {
         { "⚡", "Instant Skip works in Infinite", "Removed the old Infinite-mode block that prevented Smart Farm from pressing Skip Wave.", "FIX" },
         { "♾️", "Dedicated Infinite retry", "Infinite asks for the next wave every ~0.25s until the server allows it, without the normal request backoff.", "NEW" },
@@ -266,9 +274,14 @@ C.DEFAULTS = {
     sellIdle = true,           -- sell heroes that never get a target to fund a better buy
     saveRatio = 0.7,           -- buy an affordable action if it is worth ≥ this share of the best one
     gridStep = 3,
+    -- interface
+    uiTheme = 1,               -- 1 Midnight Candy · 2 Obsidian Blue · 3 Emerald Glass · 4 Crimson Night · 5 Frosted Violet
+    uiScale = 1.00,            -- whole-window scale
+    uiAnimations = true,       -- tab/card/toast motion
+    uiGlow = true,             -- subtle gradients and accent glow
     -- misc
     antiAfk = true, logConsole = false, logLevel = 1,
-    shareStats = true,         -- send anonymous game stats to the script author (Settings → Help improve the script turns it off)
+    shareStats = true,         -- send anonymous game stats to the script author (Settings → Data & Community turns it off)
     shareEvery = 60,           -- minutes between summary reports
     useHive = true,            -- blend the hive's hero measurements (GitHub hive.json) into the scores
     clearPlans = true,         -- battle sim plans each map's fastest team + placement (only where it matches real times)
@@ -4720,6 +4733,379 @@ end
 --  GUI (NexusLib)
 -- ============================================================
 local GUI = { UI = {}, LIVE = {} }
+
+function GUI.applyTheme(Lib)
+    local themes = {
+        {
+            name = "Midnight Candy",
+            bg = Color3.fromRGB(11, 13, 24), panel = Color3.fromRGB(17, 20, 34),
+            card = Color3.fromRGB(25, 29, 47), border = Color3.fromRGB(56, 62, 91),
+            accent = Color3.fromRGB(255, 101, 181), accentD = Color3.fromRGB(203, 66, 143),
+            accentBg = Color3.fromRGB(58, 30, 64), text = Color3.fromRGB(248, 249, 255),
+            sub = Color3.fromRGB(164, 172, 196), green = Color3.fromRGB(79, 222, 154),
+            purple = Color3.fromRGB(179, 139, 255), red = Color3.fromRGB(255, 105, 123),
+            orange = Color3.fromRGB(255, 171, 92), gold = Color3.fromRGB(255, 218, 105),
+        },
+        {
+            name = "Obsidian Blue",
+            bg = Color3.fromRGB(8, 13, 22), panel = Color3.fromRGB(13, 21, 34),
+            card = Color3.fromRGB(19, 30, 48), border = Color3.fromRGB(47, 72, 104),
+            accent = Color3.fromRGB(80, 166, 255), accentD = Color3.fromRGB(49, 113, 201),
+            accentBg = Color3.fromRGB(23, 48, 77), text = Color3.fromRGB(241, 247, 255),
+            sub = Color3.fromRGB(151, 171, 196), green = Color3.fromRGB(73, 218, 157),
+            purple = Color3.fromRGB(143, 139, 255), red = Color3.fromRGB(255, 105, 120),
+            orange = Color3.fromRGB(255, 166, 86), gold = Color3.fromRGB(255, 213, 87),
+        },
+        {
+            name = "Emerald Glass",
+            bg = Color3.fromRGB(8, 18, 17), panel = Color3.fromRGB(12, 27, 25),
+            card = Color3.fromRGB(17, 39, 35), border = Color3.fromRGB(48, 86, 76),
+            accent = Color3.fromRGB(73, 230, 169), accentD = Color3.fromRGB(38, 162, 117),
+            accentBg = Color3.fromRGB(25, 65, 53), text = Color3.fromRGB(240, 255, 249),
+            sub = Color3.fromRGB(151, 193, 178), green = Color3.fromRGB(87, 233, 166),
+            purple = Color3.fromRGB(169, 137, 255), red = Color3.fromRGB(255, 110, 124),
+            orange = Color3.fromRGB(255, 178, 92), gold = Color3.fromRGB(247, 218, 94),
+        },
+        {
+            name = "Crimson Night",
+            bg = Color3.fromRGB(20, 9, 14), panel = Color3.fromRGB(31, 13, 20),
+            card = Color3.fromRGB(45, 19, 29), border = Color3.fromRGB(91, 45, 58),
+            accent = Color3.fromRGB(255, 91, 120), accentD = Color3.fromRGB(190, 50, 79),
+            accentBg = Color3.fromRGB(74, 27, 43), text = Color3.fromRGB(255, 245, 248),
+            sub = Color3.fromRGB(200, 157, 170), green = Color3.fromRGB(79, 222, 154),
+            purple = Color3.fromRGB(190, 131, 255), red = Color3.fromRGB(255, 93, 112),
+            orange = Color3.fromRGB(255, 165, 80), gold = Color3.fromRGB(255, 211, 91),
+        },
+        {
+            name = "Frosted Violet",
+            bg = Color3.fromRGB(16, 15, 29), panel = Color3.fromRGB(24, 22, 42),
+            card = Color3.fromRGB(34, 31, 57), border = Color3.fromRGB(72, 67, 108),
+            accent = Color3.fromRGB(171, 126, 255), accentD = Color3.fromRGB(118, 78, 200),
+            accentBg = Color3.fromRGB(52, 40, 82), text = Color3.fromRGB(249, 247, 255),
+            sub = Color3.fromRGB(181, 173, 207), green = Color3.fromRGB(83, 224, 160),
+            purple = Color3.fromRGB(190, 145, 255), red = Color3.fromRGB(255, 109, 130),
+            orange = Color3.fromRGB(255, 176, 96), gold = Color3.fromRGB(255, 222, 112),
+        },
+    }
+    local idx = math.clamp(math.floor(tonumber(CFG.uiTheme) or 1), 1, #themes)
+    CFG.uiTheme = idx
+    local t = themes[idx]
+    GUI.themeName = t.name
+    if Lib.Colors then
+        for k, v in pairs(t) do
+            if k ~= "name" then Lib.Colors[k] = v end
+        end
+    end
+    return t
+end
+
+function GUI.decorate(Win, Lib)
+    if not (Win and Win._main and Win._screen and Win._tabs) then return end
+    local TweenService = game:GetService("TweenService")
+    local P = Lib.Colors or {}
+    local main = Win._main
+    local tabs = Win._tabs
+    local anim = CFG.uiAnimations ~= false
+    local glow = CFG.uiGlow ~= false
+
+    local function tw(obj, sec, props, style, dir)
+        if not anim or not obj or not obj.Parent then
+            for k, v in pairs(props) do pcall(function() obj[k] = v end) end
+            return
+        end
+        pcall(function()
+            TweenService:Create(obj, TweenInfo.new(sec or 0.18, style or Enum.EasingStyle.Quint, dir or Enum.EasingDirection.Out), props):Play()
+        end)
+    end
+    local function mix(a, b, t)
+        return Color3.new(a.R + (b.R-a.R)*t, a.G + (b.G-a.G)*t, a.B + (b.B-a.B)*t)
+    end
+
+    local uiScale = main:FindFirstChild("CKD_UI_SCALE") or Instance.new("UIScale")
+    uiScale.Name = "CKD_UI_SCALE"
+    uiScale.Parent = main
+    uiScale.Scale = math.clamp(tonumber(CFG.uiScale) or 1, 0.80, 1.20)
+    GUI.uiScaleObject = uiScale
+
+    local mainCorner = main:FindFirstChildOfClass("UICorner")
+    if mainCorner then mainCorner.CornerRadius = UDim.new(0, 18) end
+    local mainStroke = main:FindFirstChildOfClass("UIStroke")
+    if mainStroke then
+        mainStroke.Color = P.accent
+        mainStroke.Thickness = 1.2
+        mainStroke.Transparency = glow and 0.52 or 0.72
+    end
+    if glow and not main:FindFirstChild("CKD_MainGradient") then
+        local g = Instance.new("UIGradient")
+        g.Name = "CKD_MainGradient"
+        g.Rotation = 35
+        g.Color = ColorSequence.new({
+            ColorSequenceKeypoint.new(0, mix(P.bg, P.accentBg, 0.08)),
+            ColorSequenceKeypoint.new(0.55, P.bg),
+            ColorSequenceKeypoint.new(1, mix(P.bg, P.panel, 0.28)),
+        })
+        g.Parent = main
+    end
+
+    if anim then
+        uiScale.Scale = math.max(0.88, uiScale.Scale - 0.055)
+        tw(uiScale, 0.38, { Scale = math.clamp(tonumber(CFG.uiScale) or 1, 0.80, 1.20) }, Enum.EasingStyle.Back)
+    end
+
+    local any
+    for _, td in pairs(tabs) do any = td break end
+    if not any then return end
+    local tabBar = any.btn and any.btn.Parent
+    local sidebar = tabBar and tabBar.Parent
+    local content = any.page and any.page.Parent
+    if not (sidebar and content) then return end
+
+    sidebar.Size = UDim2.new(0, 188, 1, -24)
+    sidebar.BackgroundColor3 = P.panel
+    content.Position = UDim2.new(0, 202, 0, 70)
+    content.Size = UDim2.new(1, -216, 1, -108)
+
+    if glow and not sidebar:FindFirstChild("CKD_SideGradient") then
+        local sg = Instance.new("UIGradient")
+        sg.Name = "CKD_SideGradient"
+        sg.Rotation = 90
+        sg.Color = ColorSequence.new({
+            ColorSequenceKeypoint.new(0, mix(P.panel, P.accentBg, 0.22)),
+            ColorSequenceKeypoint.new(0.35, P.panel),
+            ColorSequenceKeypoint.new(1, mix(P.panel, P.bg, 0.35)),
+        })
+        sg.Parent = sidebar
+    end
+
+    for _, child in ipairs(sidebar:GetChildren()) do
+        if child:IsA("Frame") and child ~= tabBar and child.Size.Y.Offset >= 50 and child.Position.Y.Offset <= 4 then
+            child.Size = UDim2.new(1, 0, 0, 72)
+            for _, lbl in ipairs(child:GetDescendants()) do
+                if lbl:IsA("TextLabel") then
+                    if lbl.Text:find("CKD") or lbl.Text:find("Candy Kingdom") then
+                        lbl.Text = "SMART FARM"
+                        lbl.TextSize = 16
+                        lbl.Font = Enum.Font.GothamBlack
+                        lbl.TextColor3 = P.text
+                    elseif lbl.Text:find("CONTROL CENTER") or lbl.Text:find("Smart Farm") or lbl.Text:find("v" .. VERSION, 1, true) then
+                        lbl.Text = "CONTROL CENTER  ·  v" .. VERSION
+                        lbl.TextSize = 9
+                        lbl.TextColor3 = P.accent
+                    end
+                end
+            end
+        end
+    end
+    if tabBar:IsA("ScrollingFrame") then
+        tabBar.Position = UDim2.new(0, 0, 0, 80)
+        tabBar.Size = UDim2.new(1, 0, 1, -92)
+        tabBar.ScrollBarThickness = 0
+    end
+
+    local oldHeader = main:FindFirstChild("CKD_CommandHeader")
+    if oldHeader then oldHeader:Destroy() end
+    local header = Instance.new("Frame")
+    header.Name = "CKD_CommandHeader"
+    header.Size = UDim2.new(1, -216, 0, 54)
+    header.Position = UDim2.new(0, 202, 0, 10)
+    header.BackgroundColor3 = P.card
+    header.BorderSizePixel = 0
+    header.Parent = main
+    Instance.new("UICorner", header).CornerRadius = UDim.new(0, 13)
+    local hs = Instance.new("UIStroke", header)
+    hs.Color = P.border
+    hs.Thickness = 1
+    hs.Transparency = 0.28
+
+    local hGrad = Instance.new("UIGradient", header)
+    hGrad.Rotation = 10
+    hGrad.Color = ColorSequence.new({
+        ColorSequenceKeypoint.new(0, mix(P.card, P.accentBg, glow and 0.22 or 0.08)),
+        ColorSequenceKeypoint.new(1, P.card),
+    })
+
+    local accentLine = Instance.new("Frame", header)
+    accentLine.Size = UDim2.new(0, 4, 0, 28)
+    accentLine.Position = UDim2.new(0, 12, 0.5, -14)
+    accentLine.BackgroundColor3 = P.accent
+    accentLine.BorderSizePixel = 0
+    Instance.new("UICorner", accentLine).CornerRadius = UDim.new(1,0)
+
+    local title = Instance.new("TextLabel", header)
+    title.Name = "Title"
+    title.BackgroundTransparency = 1
+    title.Position = UDim2.new(0, 28, 0, 8)
+    title.Size = UDim2.new(1, -190, 0, 20)
+    title.Text = "Home"
+    title.TextColor3 = P.text
+    title.Font = Enum.Font.GothamBlack
+    title.TextSize = 16
+    title.TextXAlignment = Enum.TextXAlignment.Left
+
+    local sub = Instance.new("TextLabel", header)
+    sub.Name = "Sub"
+    sub.BackgroundTransparency = 1
+    sub.Position = UDim2.new(0, 28, 0, 29)
+    sub.Size = UDim2.new(1, -190, 0, 15)
+    sub.Text = "Live automation command center"
+    sub.TextColor3 = P.sub
+    sub.Font = Enum.Font.Gotham
+    sub.TextSize = 9
+    sub.TextXAlignment = Enum.TextXAlignment.Left
+
+    local chip = Instance.new("TextLabel", header)
+    chip.Name = "PlaceChip"
+    chip.AnchorPoint = Vector2.new(1, 0.5)
+    chip.Position = UDim2.new(1, -14, 0.5, 0)
+    chip.Size = UDim2.new(0, 116, 0, 28)
+    chip.BackgroundColor3 = P.accentBg
+    chip.BorderSizePixel = 0
+    chip.TextColor3 = P.accent
+    chip.Font = Enum.Font.GothamBold
+    chip.TextSize = 10
+    chip.Text = "●  LOBBY"
+    Instance.new("UICorner", chip).CornerRadius = UDim.new(1,0)
+    local chipStroke = Instance.new("UIStroke", chip)
+    chipStroke.Color = P.accentD
+    chipStroke.Transparency = 0.35
+
+    GUI.headerTitle, GUI.headerSub, GUI.headerChip = title, sub, chip
+    local descriptions = {
+        Home = "Live automation command center",
+        Heroes = "Traits, stats, summons, evolution and roster tools",
+        Play = "Route planner, challenges, acts and Infinite",
+        Battle = "Placement, upgrades, abilities and wave control",
+        Logs = "Live activity, diagnostics and run totals",
+        Updates = "Version history and feature changes",
+        Settings = "Interface, behavior and data controls",
+    }
+
+    local function animatePage(td)
+        if not (td and td.page and td.page.Parent) then return end
+        local page = td.page
+        if anim then
+            page.Position = UDim2.new(0, 14, 0, 0)
+            page.ScrollBarImageTransparency = 1
+            tw(page, 0.24, { Position = UDim2.new(0,0,0,0), ScrollBarImageTransparency = 0.35 })
+        else
+            page.Position = UDim2.new(0,0,0,0)
+        end
+    end
+
+    for name, td in pairs(tabs) do
+        local sc = td.btn:FindFirstChild("CKD_TabScale") or Instance.new("UIScale")
+        sc.Name = "CKD_TabScale"
+        sc.Parent = td.btn
+        td.btn.Size = UDim2.new(1, 0, 0, 38)
+        local corner = td.btn:FindFirstChildOfClass("UICorner")
+        if corner then corner.CornerRadius = UDim.new(0, 10) end
+        td.indicator.Size = UDim2.new(0, 3, 1, -12)
+        td.indicator.Position = UDim2.new(0, 1, 0, 6)
+
+        Win._track(td.btn.MouseEnter:Connect(function()
+            tw(sc, 0.14, { Scale = 1.025 }, Enum.EasingStyle.Quad)
+        end))
+        Win._track(td.btn.MouseLeave:Connect(function()
+            tw(sc, 0.14, { Scale = 1.00 }, Enum.EasingStyle.Quad)
+        end))
+        Win._track(td.btn.Activated:Connect(function()
+            task.defer(function()
+                if not td.page.Parent then return end
+                title.Text = name
+                sub.Text = descriptions[name] or "Smart Farm"
+                animatePage(td)
+                tw(accentLine, 0.18, { Size = UDim2.new(0, 4, 0, 34) }, Enum.EasingStyle.Back)
+                task.delay(0.18, function()
+                    if accentLine.Parent then tw(accentLine, 0.16, { Size = UDim2.new(0,4,0,28) }) end
+                end)
+            end)
+        end))
+    end
+
+    for _, td in pairs(tabs) do
+        td.page.ScrollBarThickness = 2
+        td.page.ScrollBarImageColor3 = P.accent
+        for _, card in ipairs(td.page:GetChildren()) do
+            if card:IsA("Frame") and card.BackgroundTransparency < 0.99 and card.Size.Y.Offset >= 24 then
+                local corner = card:FindFirstChildOfClass("UICorner")
+                if corner then corner.CornerRadius = UDim.new(0, 12) end
+                local stroke = card:FindFirstChildOfClass("UIStroke")
+                if stroke then
+                    stroke.Color = P.border
+                    stroke.Transparency = 0.30
+                end
+                if glow and not card:FindFirstChild("CKD_CardGradient") then
+                    local cg = Instance.new("UIGradient")
+                    cg.Name = "CKD_CardGradient"
+                    cg.Rotation = 90
+                    cg.Color = ColorSequence.new({
+                        ColorSequenceKeypoint.new(0, mix(P.card, P.accentBg, 0.07)),
+                        ColorSequenceKeypoint.new(1, P.card),
+                    })
+                    cg.Parent = card
+                end
+                local scale = card:FindFirstChild("CKD_HoverScale") or Instance.new("UIScale")
+                scale.Name = "CKD_HoverScale"
+                scale.Parent = card
+                Win._track(card.MouseEnter:Connect(function()
+                    tw(scale, 0.13, { Scale = 1.008 }, Enum.EasingStyle.Quad)
+                    if stroke then tw(stroke, 0.13, { Transparency = 0.08 }) end
+                end))
+                Win._track(card.MouseLeave:Connect(function()
+                    tw(scale, 0.13, { Scale = 1.000 }, Enum.EasingStyle.Quad)
+                    if stroke then tw(stroke, 0.13, { Transparency = 0.30 }) end
+                end))
+                local clicker = card:FindFirstChildWhichIsA("TextButton", true)
+                if clicker then
+                    Win._track(clicker.Activated:Connect(function()
+                        if not anim then return end
+                        tw(scale, 0.07, { Scale = 0.985 }, Enum.EasingStyle.Quad)
+                        task.delay(0.075, function()
+                            if scale.Parent then tw(scale, 0.15, { Scale = 1.008 }, Enum.EasingStyle.Back) end
+                        end)
+                    end))
+                end
+            end
+        end
+    end
+
+    local baseNotify = Win.Notify
+    function Win:Notify(a, b, c, d)
+        local toast = baseNotify(self, a, b, c, d)
+        if toast and toast.Parent and anim then
+            local scale = Instance.new("UIScale")
+            scale.Scale = 0.88
+            scale.Parent = toast
+            tw(scale, 0.22, { Scale = 1 }, Enum.EasingStyle.Back)
+        end
+        return toast
+    end
+
+    task.spawn(function()
+        local pulse = false
+        while SF.alive and main.Parent and header.Parent do
+            local inMatch = SF.where == "match"
+            chip.Text = inMatch and "●  MATCH LIVE" or "●  LOBBY"
+            chip.TextColor3 = inMatch and P.green or P.accent
+            chip.BackgroundColor3 = inMatch and mix(P.panel, P.green, 0.16) or P.accentBg
+            if anim and glow then
+                pulse = not pulse
+                tw(accentLine, 0.65, { BackgroundTransparency = pulse and 0.05 or 0.35 }, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut)
+            end
+            task.wait(0.7)
+        end
+    end)
+
+    task.defer(function()
+        local td = tabs.Home
+        if td then
+            title.Text = "Home"
+            sub.Text = descriptions.Home
+            animatePage(td)
+        end
+    end)
+end
+
 function GUI.load()
     local function try(src, from)
         if type(src) ~= "string" or #src == 0 then return nil end
@@ -4738,27 +5124,15 @@ end
 function GUI.build()
     local Lib = GUI.load()
     if not Lib then warn("[CKD] NexusLib failed to load — running without a window") return end
-    -- Candy UI theme: mutate NexusLib's exported palette before the window is constructed.
-    -- NexusLib.Colors is the same table the library uses internally, so every control inherits it.
-    if Lib.Colors then
-        local P = Lib.Colors
-        P.bg       = Color3.fromRGB(18, 11, 28)
-        P.panel    = Color3.fromRGB(29, 17, 43)
-        P.card     = Color3.fromRGB(42, 24, 58)
-        P.border   = Color3.fromRGB(82, 52, 102)
-        P.accent   = Color3.fromRGB(255, 105, 180)
-        P.accentD  = Color3.fromRGB(205, 72, 146)
-        P.accentBg = Color3.fromRGB(68, 30, 73)
-        P.text     = Color3.fromRGB(250, 244, 255)
-        P.sub      = Color3.fromRGB(204, 184, 216)
-        P.green    = Color3.fromRGB(99, 230, 163)
-        P.purple   = Color3.fromRGB(192, 132, 252)
-        P.red      = Color3.fromRGB(255, 105, 120)
-        P.orange   = Color3.fromRGB(255, 170, 92)
-        P.gold     = Color3.fromRGB(255, 219, 112)
-    end
-    local title = "🍭 Candy Kingdom Defense"
-    local Win = Lib:Window({ title = title, subtitle = "Smart Farm  •  Adaptive Auto Farm  •  v" .. VERSION, width = 900, height = 610 })
+    GUI.applyTheme(Lib)
+    local title = "🍬 CKD • Smart Farm"
+    local Win = Lib:Window({
+        title = title,
+        subtitle = "CONTROL CENTER  •  " .. tostring(GUI.themeName or "Theme") .. "  •  v" .. VERSION,
+        width = 980,
+        height = 650,
+        maxNotifications = 6,
+    })
     GUI.Win = Win
     pcall(function()
         local sg = LP:FindFirstChildOfClass("PlayerGui"):FindFirstChild("NexusLib_" .. title:gsub("%s", ""))
@@ -4774,25 +5148,25 @@ function GUI.build()
     SF.notify = function(t, m, k) pcall(function() Win:Notify(t, m, 6, k or "default") end) end
 
     GUI.COL = Lib.Colors or {}
-    local T = Win:Tab("🏠", "Dashboard")
+    local T = Win:Tab("🏠", "Home")
     UI.master = T:Toggle("Smart Farm", "Master switch for every system (lobby + match)", CFG.master, function(on)
         setCfg("master", on); Win:Status(on and "▶ Farming" or "⏸ Paused")
     end)
     GUI.SYSTEMS = { "Mode", "Battle", "Economy", "Placement", "Upgrade", "Abilities", "Match", "Evolve", "Banner", "Summon", "Team", "Feed", "Traits", "Stats", "Tourney", "Cleanup", "Rewards" }
     if T.StatusCard and T.StatGrid and T.KeyValue then
         -- NexusLib 1.7+: what it's doing and why, goals at a glance, then every system in one compact list
-        T:Section("🍬 Live Run")
+        T:Section("LIVE COMMAND")
         GUI.nowCard = T:StatusCard({ icon = "⏳", title = "Starting…", text = "", sub = "" })
         GUI.nextCard = T:StatusCard({ icon = "⏭", title = "Up next", text = "", sub = "" })
-        T:Section("🎯 Progress Goals")
+        T:Section("GOALS & PROGRESS")
         GUI.goals = T:StatGrid({ "Lich Lord", "Oh My Glob", "Raid", "Gems", "Lich Portals", "Team Power" }, 3)
-        T:Section("⚙️ Automation Systems")
+        T:Section("AUTOMATION HEALTH")
         GUI.systems = T:KeyValue(GUI.SYSTEMS, 84)
     else
         T:Section("Systems")
         for _, k in ipairs(GUI.SYSTEMS) do LIVE[k] = T:Label(k .. ": ...") end
     end
-    T:Section("⚡ Quick Controls")
+    T:Section("QUICK ACTIONS")
     T:Button("⏹", "Stop All", "Pause every system", Color3.fromRGB(239, 68, 68), function()
         CFG.master = false; pcall(function() UI.master.Set(false, true) end); SF.saveNow(); notify("Stopped", "Smart Farm paused", "warning")
     end)
@@ -4813,7 +5187,7 @@ function GUI.build()
         GUI.lobbyTiles = T:StatGrid({ "Gems", "Trait Crystals", "Juice", "Storage", "Evolve Focus", "Stat Chase" }, 3)
     end
 
-    T:Section("🎲 Roll Preview Lab")
+    T:Section("ROLL PREVIEW")
     if T.KeyValue then
         GUI.rollPreview = T:KeyValue({ "Trait", "Stats", "Summon", "Detector" }, 118)
     else
@@ -4880,7 +5254,7 @@ function GUI.build()
     UI.goal = T:Dropdown("Goal", "Progress: beat maps fast, farm strength at walls · Gems: most gems per minute", { "Progress (beat maps fast)", "Gems per minute" }, CFG.goal, function(_, _, i) setCfg("goal", tonumber(i) or 1) end)
     tog(T, "Auto Play", "Launch the best mode and keep chaining runs", "play")
 
-    T:Section("⚔️ Normal Stage Loop")
+    T:Section("STAGE ROUTER")
     if T.StatusCard then
         GUI.normalCard = T:StatusCard({ icon = "⚔️", title = "Selected Stage Loop · OFF", text = "", sub = "" })
     end
@@ -4929,7 +5303,7 @@ function GUI.build()
         notify("Normal Loop", "Smart planner is back in control", "info")
     end)
 
-    T:Section("🏆 Challenge Farm")
+    T:Section("DUNGEON TRAIN")
     tog(T, "Challenges", "Use the current Dungeon Train cars", "challenges")
     UI.challengeMode = T:Dropdown("Challenge Behavior", "First wins only · keep repeats available · or endlessly rotate every active Dungeon Train car",
         { "First wins only", "Keep farming", "Endless challenge loop" }, tonumber(CFG.challengeMode) or 3, function(_, _, i)
@@ -4945,9 +5319,9 @@ function GUI.build()
     end)
 
     if T.KeyValue then
-        T:Section("🧠 Next-Run Ranking")
+        T:Section("NEXT-RUN RANKING")
         GUI.rank = T:KeyValue({ "#1", "#2", "#3", "#4", "#5", "#6" }, 26)
-        T:Section("📊 Run Records")
+        T:Section("RUN HISTORY")
         GUI.records = T:KeyValue({ "1", "2", "3", "4", "5", "6", "7", "8" }, 170)
     else
         LIVE.modes = T:Paragraph("...")
@@ -4980,7 +5354,7 @@ function GUI.build()
     end)
 
     -- ── Battle: what the farm has learned about each hero, then the switches ──
-    T = Win:Tab("⚔️", "Combat")
+    T = Win:Tab("⚔️", "Battle")
     if T.KeyValue then
         T:Section("Unit Learning · measured damage vs the game's numbers")
         GUI.learn = T:KeyValue({ "u1", "u2", "u3", "u4", "u5", "u6", "u7", "u8" }, 120)
@@ -4993,20 +5367,20 @@ function GUI.build()
     tog(T, "Auto Upgrade", "Buy by damage gained per coin (counts 2 levels ahead)", "upgrade")
     tog(T, "Auto Start Waves", "Press start when the road is empty", "autoStart")
     sld(T, "Save Threshold", "Buy an affordable option worth ≥ this share of the best", "saveRatio", { min = 0, max = 1, step = 0.05, format = pct })
-    T:Section("Abilities")
+    T:Section("ABILITIES")
     tog(T, "Auto Abilities", "Fire unlocked abilities", "abilities")
     tog(T, "Ability Timing", "Hold for a crowd or a boss in range", "abilityTiming")
     sld(T, "Max Hold (s)", "Never hold longer than this with enemies in range", "abilityHold", { min = 5, max = 60, step = 5, format = int })
-    T:Section("Team Synergy")
+    T:Section("TEAM SYNERGY")
     tog(T, "Pair Passives", "Pick and place partners so pair passives switch on", "passives")
     tog(T, "Score Upgrade Attacks", "Rate heroes by their upgraded attacks (area hits, stuns, burns), not just the first one", "scorePath")
-    T:Section("Waves")
+    T:Section("WAVE CONTROL")
     tog(T, "Early Wave Calls", "Allow the farm to press the game's Skip Wave / Start action automatically", "earlyCall")
     tog(T, "⚡ Instant Auto Skip", "Skip as soon as the current wave finishes spawning; the server still decides when the request is accepted", "instantSkip")
     sld(T, "Instant Retry (s)", "How often the farm may check again if the server is not ready yet", "instantSkipRetry", { min = 0.2, max = 2, step = 0.05, format = f2 })
     sld(T, "Call With ≤ Enemies", "Used only when Instant Auto Skip is OFF · × learned boldness", "callAlive", { min = 1, max = 30, step = 1, format = int })
     sld(T, "Call With Front ≤", "Used only when Instant Auto Skip is OFF · furthest enemy allowed down the road", "callReach", { min = 0.1, max = 0.9, step = 0.05, format = pct })
-    T:Section("Targeting & Selling")
+    T:Section("TARGETING & SELLING")
     tog(T, "Smart Targeting", "Heavy hitters target the strongest, fast ones the first", "smartTarget")
     tog(T, "Sell Idle Heroes", "Sell heroes with no target for 3+ waves for a better buy", "sellIdle")
     T:Button("🧮", "Reset Unit Learning", "Forget measured unit efficiency", function()
@@ -5014,14 +5388,14 @@ function GUI.build()
         SF.log(1, "INFO", "unit learning reset by the player"); SF.saveNow(); notify("Battle", "learning reset", "success")
     end)
 
-    T = Win:Tab("📜", "Activity")
+    T = Win:Tab("📜", "Logs")
     tog(T, "Print To Console", "Mirror log lines to the executor console", "logConsole")
     UI.logLevel = T:Dropdown("Log Level", "Quiet · Normal · Verbose", { "Quiet", "Normal", "Verbose" }, (CFG.logLevel or 1) + 1, function(_, _, i) setCfg("logLevel", math.clamp((tonumber(i) or 2) - 1, 0, 2)) end)
     LIVE.log = T:Paragraph("...")
     LIVE.totals = T:Label("...")
 
     -- one card per change (bold title, readable text, coloured tag); plain lines on an older NexusLib
-    T = Win:Tab("📰", "What's New")
+    T = Win:Tab("📰", "Updates")
     T:Section("💡 Suggest something for the farm")
     local idea = ""
     local ideaBox = T:Input("Your idea", "Sent anonymously (no Roblox name) · one every 10 min · 500 characters", "e.g. farm the next event's shop…", "", function(text) idea = tostring(text or "") end)
@@ -5050,8 +5424,37 @@ function GUI.build()
     end
 
     T = Win:Tab("⚙️", "Settings")
+    T:Section("INTERFACE")
+    UI.uiTheme = T:Dropdown("Theme", "Change the complete Smart Farm color system", {
+        "Midnight Candy", "Obsidian Blue", "Emerald Glass", "Crimson Night", "Frosted Violet"
+    }, tonumber(CFG.uiTheme) or 1, function(_, _, i)
+        i = math.clamp(tonumber(i) or 1, 1, 5)
+        if i == CFG.uiTheme then return end
+        setCfg("uiTheme", i)
+        notify("Interface", "Applying theme…", "info")
+        task.defer(function()
+            pcall(function() if GUI.Win then GUI.Win:Destroy() end end)
+            GUI.UI, GUI.LIVE = {}, {}
+            task.wait()
+            pcall(GUI.build)
+        end)
+    end)
+    UI.uiScale = T:Slider("UI Scale", "Resize the whole control center", {
+        min = 0.80, max = 1.20, step = 0.05, default = CFG.uiScale,
+        format = function(v) return string.format("%.0f%%", v * 100) end
+    }, function(v)
+        setCfg("uiScale", v)
+        if GUI.uiScaleObject and GUI.uiScaleObject.Parent then
+            pcall(function() GUI.uiScaleObject.Scale = v end)
+        end
+    end)
+    tog(T, "UI Animations", "Smooth tab transitions, hover lift and notification motion", "uiAnimations")
+    tog(T, "Accent Glow", "Subtle gradients, pulsing status accent and glass depth", "uiGlow")
+    T:Paragraph("Theme changes rebuild only the menu. Smart Farm automation keeps running.")
+
+    T:Section("GENERAL")
     tog(T, "Anti-AFK", "Send an input when Roblox flags you idle", "antiAfk")
-    T:Section("Help improve the script")
+    T:Section("DATA & COMMUNITY")
     -- flipping it yourself is remembered as your choice (a new default never overrides it)
     UI.shareStats = T:Toggle("Share anonymous stats", "Send match stats to the script author so the hero scores and placements improve for everyone (on by default — switch off any time)", CFG.shareStats, function(on)
         if on ~= CFG.shareStats then CFG.shareChosen = true end
@@ -5071,7 +5474,9 @@ function GUI.build()
     end)
     tog(T, "Learn from the hive", "Blend every player's measured hero damage into the scores (most for heroes you've rarely played)", "useHive")
     T:Button("💾", "Save Settings", "Write " .. C.SETTINGS, function() SF.saveNow(); notify("Saved", "settings written", "success") end)
-    Win:Status(CFG.master and "▶ Farming" or "⏸ Paused")
+
+    pcall(GUI.decorate, Win, Lib)
+    Win:Status(CFG.master and "▶ Farming" or "⏸ Paused", CFG.master and (Lib.Colors and Lib.Colors.green) or (Lib.Colors and Lib.Colors.orange))
     task.delay(3, function()
         -- Keep startup safe/light. The expensive getgc/instance scan runs only from the Deep Scan button.
         if SF.alive and SF.where == "hub" then pcall(RNGP.scan, false) end
@@ -5081,9 +5486,9 @@ function GUI.build()
         CFG.shareNoticed = true
         SF.saveSoon()
         task.delay(4, function()
-            pcall(function() Win:Notify("Anonymous stats", "Match stats are shared to improve hero scores for everyone. Switch off: Settings → Help improve the script.", 10, "default") end)
+            pcall(function() Win:Notify("Anonymous stats", "Match stats are shared to improve hero scores for everyone. Switch off: Settings → Data & Community.", 10, "default") end)
         end)
-        SF.log(1, "INFO", "anonymous match stats are on (Settings → Help improve the script to switch off)")
+        SF.log(1, "INFO", "anonymous match stats are on (Settings → Data & Community to switch off)")
     end
     -- once per new version: point at the Updates tab
     if CFG.seenVersion ~= VERSION then
@@ -5091,7 +5496,7 @@ function GUI.build()
         CFG.seenVersion = VERSION
         SF.saveSoon()
         task.delay(first and 15 or 6, function()
-            pcall(function() Win:Notify("Updated to v" .. VERSION, CHANGELOG[1].title .. " — see the 📰 What's New tab for what's new.", 10, "default") end)
+            pcall(function() Win:Notify("Updated to v" .. VERSION, CHANGELOG[1].title .. " — see the 📰 Updates tab for what's new.", 10, "default") end)
         end)
     end
 end
@@ -5382,9 +5787,9 @@ function GUI.updateMain()
     end
 end
 function GUI.loop()
-    local LIVE = GUI.LIVE
     pcall(HUB.traitBackfill)
     while SF.alive do
+        local LIVE = GUI.LIVE
         pcall(GUI.updateMain)
         pcall(GUI.updateTabs)
         for k, w in pairs(LIVE) do
@@ -5603,7 +6008,9 @@ function SF.unload()
     for _, c in ipairs(SF.conns) do pcall(function() c:Disconnect() end) end
     pcall(function() GUI.Win:Destroy() end)
     pcall(function()
-        for _, g in ipairs(LP.PlayerGui:GetChildren()) do if g.Name:find("^NexusLib_🍬") then g:Destroy() end end
+        for _, g in ipairs(LP.PlayerGui:GetChildren()) do
+            if g.Name:find("^NexusLib_") and (g.Name:find("CKD") or g.Name:find("CandyKingdom")) then g:Destroy() end
+        end
     end)
     _G.CKD_SF = nil
 end
