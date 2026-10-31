@@ -4848,8 +4848,9 @@ function GUI.decorate(Win, Lib)
     end
 
     if anim then
-        uiScale.Scale = math.max(0.88, uiScale.Scale - 0.055)
-        tw(uiScale, 0.38, { Scale = math.clamp(tonumber(CFG.uiScale) or 1, 0.80, 1.20) }, Enum.EasingStyle.Back)
+        local targetScale = math.clamp(tonumber(CFG.uiScale) or 1, 0.80, 1.20)
+        uiScale.Scale = math.max(0.72, targetScale - 0.055)
+        tw(uiScale, 0.38, { Scale = targetScale }, Enum.EasingStyle.Back)
     end
 
     local any
@@ -4888,7 +4889,7 @@ function GUI.decorate(Win, Lib)
                         lbl.Font = Enum.Font.GothamBlack
                         lbl.TextColor3 = P.text
                     elseif lbl.Text:find("CONTROL CENTER") or lbl.Text:find("Smart Farm") or lbl.Text:find("v" .. VERSION, 1, true) then
-                        lbl.Text = "CONTROL CENTER  ·  v" .. VERSION
+                        lbl.Text = "CONTROL CENTER  ·  " .. tostring(GUI.themeName or "UI") .. "  ·  v" .. VERSION
                         lbl.TextSize = 9
                         lbl.TextColor3 = P.accent
                     end
@@ -4896,10 +4897,23 @@ function GUI.decorate(Win, Lib)
             end
         end
     end
+    -- Move the old title divider below the taller brand block.
+    for _, child in ipairs(sidebar:GetChildren()) do
+        if child:IsA("Frame") and child.Size.Y.Offset == 1 and child.Position.Y.Offset >= 50 and child.Position.Y.Offset <= 74 then
+            child.Position = UDim2.new(child.Position.X.Scale, child.Position.X.Offset, 0, 72)
+        end
+    end
     if tabBar:IsA("ScrollingFrame") then
         tabBar.Position = UDim2.new(0, 0, 0, 80)
         tabBar.Size = UDim2.new(1, 0, 1, -92)
         tabBar.ScrollBarThickness = 0
+    end
+
+    local statusBar = Win._status and Win._status.Parent
+    if statusBar and statusBar:IsA("Frame") then
+        statusBar.Size = UDim2.new(1, 0, 0, 24)
+        statusBar.Position = UDim2.new(0, 0, 1, -24)
+        statusBar.BackgroundColor3 = P.panel
     end
 
     local oldHeader = main:FindFirstChild("CKD_CommandHeader")
