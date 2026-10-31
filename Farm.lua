@@ -1,5 +1,5 @@
 --[[
-    🍬 Candy Kingdom Defense — Smart Farm v2.0.1  (NexusLib)
+    🍬 Candy Kingdom Defense — Smart Farm v2.0.2  (NexusLib)
 
     One script for both places of the game:
       • Lobby (Tree Fort):  rewards → feed → traits/stats → summon → pick the best mode → launch
@@ -13,10 +13,15 @@
 
 -- claim the "running" slot synchronously, before any yield, so two queued loaders can't both start
 if _G.CKD_SF and _G.CKD_SF.alive then return end
-local VERSION = "2.0.1"
+local VERSION = "2.0.2"
 -- what changed, newest first (Updates tab; a one-time notice when a player first runs a new version)
 -- items: { icon, title, text, tag = NEW | IMPROVED | FIX }
 local CHANGELOG = {
+    { v = "2.0.2", date = "Oct 31, 2026", title = "Live Match Profile Sync", items = {
+        { "🔄", "Resources sync during matches", "Smart Farm now listens for profile updates in the match server too.", "NEW" },
+        { "📡", "Periodic exact refresh", "When GetProfile is available in a match, the script refreshes the authoritative profile every few seconds.", "NEW" },
+        { "🧮", "Safe reward fallback", "If exact profile remotes are unavailable, match-result rewards still update the cached totals like before.", "IMPROVED" },
+    } },
     { v = "2.0.1", date = "Oct 31, 2026", title = "Liquid Glass Shell Fix", items = {
         { "📐", "Auto-fit to your screen", "The window now scales itself down when Roblox's viewport is smaller than the menu.", "FIX" },
         { "🖱️", "Reliable dragging", "Drag from the title bar or page header, with hard screen bounds so the menu cannot disappear off-screen.", "FIX" },
@@ -1415,6 +1420,38 @@ function HUB.apply(res)
     if type(res) == "table" and type(res.profile) == "table" then HUB.setProfile(res.profile) end
 end
 function HUB.items(name) return HUB.prof and HUB.prof.items and tonumber(HUB.prof.items[name]) or 0 end
+
+-- Match-side profile sync. Some CKD servers expose the same profile remotes used in the lobby.
+-- When they do, this keeps gems/items exact without returning home. If not, result banking remains the fallback.
+function HUB.acceptProfilePayload(payload, source)
+    local p
+    if type(payload) == "table" and type(payload.units) == "table" then
+        p = payload
+    elseif type(payload) == "table" and type(payload.profile) == "table" then
+        p = payload.profile
+    end
+    if not p then return false end
+
+    HUB.setProfile(p)
+    B.matchProfileSyncAt = U.now()
+    B.matchProfileSyncSource = tostring(source or "profile")
+    return true
+end
+
+function HUB.matchRefreshProfile()
+    local remote = C.R("GetProfile")
+    if not remote then return false, "GetProfile unavailable" end
+
+    local ok, res = pcall(function()
+        if remote:IsA("RemoteFunction") then
+            return remote:InvokeServer()
+        end
+        return nil
+    end)
+    if not ok then return false, tostring(res) end
+    if HUB.acceptProfilePayload(res, "GetProfile") then return true end
+    return false, "no profile payload"
+end
 
 -- ============================================================
 --  ROLL PREVIEW LAB
@@ -4641,6 +4678,18 @@ function MT.run()
         local ok, e = pcall(MT.onEvent, seq, name, d)
         if not ok then SF.log(1, "BATTLE", "event " .. tostring(name) .. ": " .. tostring(e)) end
     end))
+
+    -- Exact profile updates can exist in match servers too. Subscribe when available.
+    do
+        local pc = C.R("ProfileChanged")
+        if pc and pc:IsA("RemoteEvent") then
+            table.insert(SF.conns, pc.OnClientEvent:Connect(function(payload)
+                local ok, err = pcall(HUB.acceptProfilePayload, payload, "ProfileChanged")
+                if not ok then SF.log(2, "PROFILE", "match profile event: " .. tostring(err)) end
+            end))
+        end
+    end
+
     MT.resync()
     MT.runStart = os.time()
     MT.joinedMidRun = (tonumber(MT.wave) or 0) > 1
@@ -4665,6 +4714,25 @@ function MT.run()
             end
             local retry = math.max(0.08, math.min(0.20, tonumber(CFG.instantSkipRetry) or 0.12))
             task.wait(retry)
+        end
+    end)
+
+    -- Keep the displayed resources authoritative during a match whenever CKD exposes GetProfile here.
+    -- This is intentionally much slower than combat polling to avoid unnecessary server traffic.
+    task.spawn(function()
+        local lastWarn = 0
+        while SF.alive and SF.where == "match" and not MT.over do
+            local okSync, synced, why = pcall(function()
+                local ok, err = HUB.matchRefreshProfile()
+                return ok, err
+            end)
+            if okSync and synced then
+                SF.status("Profile", "live match profile synced")
+            elseif not okSync and U.now() - lastWarn > 30 then
+                lastWarn = U.now()
+                SF.log(2, "PROFILE", "match profile refresh error: " .. tostring(synced))
+            end
+            task.wait(4)
         end
     end)
 
@@ -5591,7 +5659,11 @@ function GUI.updateTabs()
     local bugMilk = tonumber(items.raidkey) or 0
     local crystals = tonumber(items.crystal) or 0
     if GUI.resourceTiles then
-        pcall(GUI.resourceTiles.Set, "Gems", U.fmt(gems), SF.where == "match" and "live cached total" or "current balance", COL.gold, nil)
+        local exactMatchSync = SF.where == "match" and B.matchProfileSyncAt and (U.now() - B.matchProfileSyncAt) < 10
+        local gemDesc = SF.where == "match"
+            and (exactMatchSync and "server-synced live" or "reward-tracked live")
+            or "current balance"
+        pcall(GUI.resourceTiles.Set, "Gems", U.fmt(gems), gemDesc, COL.gold, nil)
         pcall(GUI.resourceTiles.Set, "Candy", U.fmt(candy), "XP Candy", COL.orange, nil)
         pcall(GUI.resourceTiles.Set, "Big Candy", U.fmt(bigCandy), "large XP Candy", COL.purple, nil)
         pcall(GUI.resourceTiles.Set, "Halloween Candy", U.fmt(hwCandy), "event currency", COL.orange, nil)
