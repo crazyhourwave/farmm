@@ -13,10 +13,16 @@
 
 -- claim the "running" slot synchronously, before any yield, so two queued loaders can't both start
 if _G.CKD_SF and _G.CKD_SF.alive then return end
-local VERSION = "1.8.1"
+local VERSION = "1.8.2"
 -- what changed, newest first (Updates tab; a one-time notice when a player first runs a new version)
 -- items: { icon, title, text, tag = NEW | IMPROVED | FIX }
 local CHANGELOG = {
+    { v = "1.8.2", date = "Oct 31, 2026", title = "Roll Preview Startup Fix", items = {
+        { "🛠️", "Script loads again", "Fixed a malformed newline string in the Roll Preview UI that could stop the whole Lua file from compiling.", "FIX" },
+        { "🪶", "Lightweight startup scan", "Startup only checks safe profile/catalog data. The heavier client-memory scan runs only when you press Deep Scan.", "FIX" },
+        { "🛡️", "Preview failures isolated", "If the preview detector hits an unsupported executor API, the rest of Smart Farm keeps running.", "IMPROVED" },
+        { "🎲", "Roll Preview preserved", "Trait, Stats and Summon preview/odds information remains available in Heroes.", "IMPROVED" },
+    } },
     { v = "1.8.1", date = "Oct 31, 2026", title = "Roll Preview Lab", items = {
         { "🎲", "Next Roll Preview", "Adds a live Trait / Stats / Summon preview panel in the Heroes tab.", "NEW" },
         { "🔎", "Client RNG probe", "Searches replicated/client-visible tables and values for an actual queued next result before falling back to odds.", "NEW" },
@@ -1529,12 +1535,18 @@ end
 function RNGP.scan(deep)
     RNGP.exact, RNGP.exactPath, RNGP.state = {}, {}, {}
     local found = 0
-    found = found + rngScanTable(HUB.prof or B.prof or {}, "profile", 4, 2500)
-    found = found + rngScanTable(C.Catalog or {}, "Catalog", 4, 3500)
-    found = found + rngScanTable(C.UnitStats or {}, "UnitStats", 3, 1500)
+    local function safeScan(root, label, depth, budget)
+        local ok, n = pcall(rngScanTable, root, label, depth, budget)
+        return ok and (tonumber(n) or 0) or 0
+    end
+    found = found + safeScan(HUB.prof or B.prof or {}, "profile", 4, 2500)
+    found = found + safeScan(C.Catalog or {}, "Catalog", 4, 3500)
+    found = found + safeScan(C.UnitStats or {}, "UnitStats", 3, 1500)
     if deep then
-        found = found + rngScanInstances()
-        found = found + rngScanGC()
+        local okI, nI = pcall(rngScanInstances)
+        local okG, nG = pcall(rngScanGC)
+        found = found + (okI and (tonumber(nI) or 0) or 0)
+        found = found + (okG and (tonumber(nG) or 0) or 0)
         RNGP.deepScanned = true
     end
     RNGP.scannedAt = U.now()
@@ -4755,8 +4767,15 @@ function GUI.build()
         LIVE.rollPreview = T:Paragraph("Scanning client RNG state…")
     end
     T:Button("🔎", "Deep Scan Client RNG", "Search replicated values and executor-visible client tables for a real queued next result", function()
-        local found = RNGP.scan(true)
-        notify("Roll Preview", found > 0 and ("found " .. found .. " exact candidate(s)") or "no exact next-result queue found", found > 0 and "success" or "info")
+        task.spawn(function()
+            local ok, found = pcall(RNGP.scan, true)
+            if not ok then
+                notify("Roll Preview", "Deep Scan is not supported by this executor/client build", "warning")
+                SF.log(1, "RNG", "deep scan failed: " .. tostring(found))
+                return
+            end
+            notify("Roll Preview", found > 0 and ("found " .. found .. " exact candidate(s)") or "no exact next-result queue found", found > 0 and "success" or "info")
+        end)
     end)
     T:Paragraph("EXACT CANDIDATE only appears when the client exposes a recognizable queued result. If the server keeps RNG private, this shows odds/pity instead of inventing a prediction.")
 
@@ -5001,7 +5020,8 @@ function GUI.build()
     T:Button("💾", "Save Settings", "Write " .. C.SETTINGS, function() SF.saveNow(); notify("Saved", "settings written", "success") end)
     Win:Status(CFG.master and "▶ Farming" or "⏸ Paused")
     task.delay(3, function()
-        if SF.alive and SF.where == "hub" then pcall(RNGP.scan, true) end
+        -- Keep startup safe/light. The expensive getgc/instance scan runs only from the Deep Scan button.
+        if SF.alive and SF.where == "hub" then pcall(RNGP.scan, false) end
     end)
     -- tell every player once that sharing is on, and where to switch it off
     if CFG.shareStats and not CFG.shareNoticed then
@@ -5067,7 +5087,15 @@ function GUI.updateTabs()
     if SF.where == "hub" and U.now() - (RNGP.scannedAt or 0) > 20 then
         pcall(RNGP.scan, false)
     end
-    local rp = RNGP.lines()
+    local okRP, rp = pcall(RNGP.lines)
+    if not okRP or type(rp) ~= "table" then
+        rp = {
+            trait = "Preview unavailable (detector error)",
+            stats = "Preview unavailable (detector error)",
+            summon = "Preview unavailable (detector error)",
+            detector = "Roll Preview hit an unsupported client API; Smart Farm is still running normally.",
+        }
+    end
     if GUI.rollPreview then
         local exactTrait = RNGP.exact.trait ~= nil
         local exactStats = RNGP.exact.stats ~= nil
@@ -5077,8 +5105,12 @@ function GUI.updateTabs()
         pcall(GUI.rollPreview.Set, "Summon", rp.summon, exactSummon and COL.green or COL.sub, "Summon")
         pcall(GUI.rollPreview.Set, "Detector", rp.detector, (exactTrait or exactStats or exactSummon) and COL.gold or COL.sub, "Detector")
     elseif LIVE.rollPreview then
-        pcall(LIVE.rollPreview.Set, table.concat({ "Trait: " .. rp.trait, "Stats: " .. rp.stats, "Summon: " .. rp.summon, "Detector: " .. rp.detector }, "
-"))
+        pcall(LIVE.rollPreview.Set, table.concat({
+            "Trait: " .. tostring(rp.trait),
+            "Stats: " .. tostring(rp.stats),
+            "Summon: " .. tostring(rp.summon),
+            "Detector: " .. tostring(rp.detector),
+        }, "\n"))
     end
 
     if GUI.normalCard then
