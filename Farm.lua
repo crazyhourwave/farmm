@@ -13,10 +13,16 @@
 
 -- claim the "running" slot synchronously, before any yield, so two queued loaders can't both start
 if _G.CKD_SF and _G.CKD_SF.alive then return end
-local VERSION = "1.7"
+local VERSION = "1.8"
 -- what changed, newest first (Updates tab; a one-time notice when a player first runs a new version)
 -- items: { icon, title, text, tag = NEW | IMPROVED | FIX }
 local CHANGELOG = {
+    { v = "1.8", date = "Oct 30, 2026", title = "Instant Wave Skip", items = {
+        { "⚡", "Instant Auto Skip", "Starts the next wave as soon as the current wave has finished spawning instead of waiting four extra seconds.", "NEW" },
+        { "🏁", "Faster first wave", "The first wave starts almost immediately after a hero is placed when Instant Auto Skip is enabled.", "IMPROVED" },
+        { "🛡️", "Server-safe", "Uses the game's normal Act('start') request and lets the server decide when a skip is accepted; no server cooldown is bypassed.", "IMPROVED" },
+        { "🎛️", "Separate toggle", "Instant Auto Skip can be turned off to return to the older safety-based Early Wave Calls behavior.", "NEW" },
+    } },
     { v = "1.7", date = "Oct 30, 2026", title = "No More v1.3 Downgrades", items = {
         { "🧷", "Exact build survives teleports", "The loader caches the exact v1.7 source before execution and Lobby ↔ Match teleports reload that same source.", "FIX" },
         { "🚫", "Old GitHub fallback removed", "If no custom loadstring URL exists, the farm will never silently fetch the old v1.3 public file.", "FIX" },
@@ -209,6 +215,8 @@ C.DEFAULTS = {
     hubEvery = 8,              -- go back to the lobby at least every N matches (banks feed / candy / rerolls)
     -- battle
     battle = true, place = true, upgrade = true, abilities = true, autoStart = true,
+    instantSkip = true,        -- request the next wave immediately once the current wave is fully spawned
+    instantSkipRetry = 0.35,   -- minimum time between accepted/attempted skip checks
     abilityTiming = true,      -- hold a ready ability for a crowd or a boss in its range
     abilityHold = 25,          -- ... but never longer than this many seconds while anything is in range
     earlyCall = true,          -- call the next wave early (measured Oct 2026: Gumdrop Gauntlet ~210s → 130–154s, 0 leaks; some maps keep their clock)
@@ -3066,14 +3074,48 @@ end
 function MT.callWave(now)
     if not (CFG.earlyCall and MT.running) or MT.over or MT.infinite then return end
     if MT.waves and MT.wave >= MT.waves then return end
-    if MT.runLeaks > 0 or now - (MT.waveStartAt or 0) < 4 or now - (MT.lastCallAt or 0) < 4 then return end
     if not MT.enemyFolder then return end
+
+    local alive, reach = MT.alive or MT.enemies, MT.reachNow or 1
+
+    -- Instant Auto Skip:
+    -- The old farm intentionally waited 4 seconds after every wave and between calls.
+    -- Here we ask as soon as the current wave has finished spawning. The server still owns
+    -- the real permission/cooldown: if Act("start") is not legal yet, it simply refuses.
+    if CFG.instantSkip then
+        local retry = math.max(0.20, tonumber(CFG.instantSkipRetry) or 0.35)
+        if now - (MT.lastCallAt or 0) < retry then return end
+
+        -- Do not stack a new wave while the server is still spawning the current one.
+        -- If the game's expected-count signal is missing, wait a tiny moment after the wave event.
+        if MT.waveExpect and MT.waveExpect > 0 then
+            if (MT.waveSpawned or 0) < MT.waveExpect then return end
+        elseif now - (MT.waveStartAt or 0) < 0.35 then
+            return
+        end
+
+        MT.lastCallAt = now
+        local key = "Act:instantSkip:" .. tostring(MT.wave)
+        local res, err = SF.request(key, C.R("Act"), "start")
+
+        if type(res) == "table" and res.ok then
+            MT.earlyCalls = MT.earlyCalls + 1
+            SF.req.back[key] = nil
+            SF.status("Waves", string.format("⚡ instant skip → wave %d (%d enemies alive)", MT.wave + 1, alive))
+            SF.log(2, "WAVES", string.format("instant skip → wave %d · %d alive · front %.2f", MT.wave + 1, alive, reach))
+        elseif err and err ~= "backoff" then
+            SF.status("Waves", "⚡ waiting for server to allow next wave")
+        end
+        return
+    end
+
+    -- Original safety-based early-wave behavior.
+    if MT.runLeaks > 0 or now - (MT.waveStartAt or 0) < 4 or now - (MT.lastCallAt or 0) < 4 then return end
     local st = C.Catalog.stage(MT.stage)
     local maxLives = st and math.floor((st.lives or 20) * ((MT.mods and MT.mods.lives) or 1)) or 0
-    if (tonumber(MT.lives) or 0) < maxLives then return end -- any life lost: play it safe for the rest of the run
-    -- the current wave must be (nearly) fully on the road first, or calls would stack half-spawned waves
+    if (tonumber(MT.lives) or 0) < maxLives then return end
     if MT.waveExpect and (MT.waveSpawned or 0) < MT.waveExpect * 0.9 then return end
-    local alive, reach = MT.alive or MT.enemies, MT.reachNow or 1
+
     if alive <= CFG.callAlive * MT.aggr and reach <= CFG.callReach * MT.aggr then
         local res = SF.request("Act:call", C.R("Act"), "start")
         MT.lastCallAt = now
@@ -4221,9 +4263,11 @@ function MT.run()
             local okC, eC = pcall(MT.callWave, t)
             if not okC then SF.log(1, "WAVES", tostring(eC)) end
             if t - lastTgt > 2 then lastTgt = t; pcall(MT.retarget) end
-            if CFG.autoStart and not MT.running and MT.enemies == 0 and U.count(MT.towers) > 0 and t - lastStart > 3 then
+            local startDelay = CFG.instantSkip and 0.35 or 3
+            if CFG.autoStart and not MT.running and MT.enemies == 0 and U.count(MT.towers) > 0 and t - lastStart > startDelay then
                 lastStart = t
-                SF.request("Act:start", C.R("Act"), "start")
+                local key = CFG.instantSkip and "Act:instantStart" or "Act:start"
+                SF.request(key, C.R("Act"), "start")
             end
             if t - lastAb > 1 then lastAb = t; pcall(MT.abilities) end
         end
@@ -4558,9 +4602,11 @@ function GUI.build()
     tog(T, "Pair Passives", "Pick and place partners so pair passives switch on", "passives")
     tog(T, "Score Upgrade Attacks", "Rate heroes by their upgraded attacks (area hits, stuns, burns), not just the first one", "scorePath")
     T:Section("Waves")
-    tog(T, "Early Wave Calls", "Send the next wave while the defense is well ahead (faster clears; turns itself off for the run after a leak)", "earlyCall")
-    sld(T, "Call With ≤ Enemies", "× learned boldness", "callAlive", { min = 1, max = 30, step = 1, format = int })
-    sld(T, "Call With Front ≤", "How far the lead enemy may be (× boldness)", "callReach", { min = 0.1, max = 0.9, step = 0.05, format = pct })
+    tog(T, "Early Wave Calls", "Allow the farm to press the game's Skip Wave / Start action automatically", "earlyCall")
+    tog(T, "⚡ Instant Auto Skip", "Skip as soon as the current wave finishes spawning; the server still decides when the request is accepted", "instantSkip")
+    sld(T, "Instant Retry (s)", "How often the farm may check again if the server is not ready yet", "instantSkipRetry", { min = 0.2, max = 2, step = 0.05, format = f2 })
+    sld(T, "Call With ≤ Enemies", "Used only when Instant Auto Skip is OFF · × learned boldness", "callAlive", { min = 1, max = 30, step = 1, format = int })
+    sld(T, "Call With Front ≤", "Used only when Instant Auto Skip is OFF · furthest enemy allowed down the road", "callReach", { min = 0.1, max = 0.9, step = 0.05, format = pct })
     T:Section("Targeting & Selling")
     tog(T, "Smart Targeting", "Heavy hitters target the strongest, fast ones the first", "smartTarget")
     tog(T, "Sell Idle Heroes", "Sell heroes with no target for 3+ waves for a better buy", "sellIdle")
