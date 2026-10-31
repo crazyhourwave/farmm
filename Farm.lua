@@ -997,7 +997,8 @@ function C.MODE.candidates(prof, now)
         local why = C.MODE.tourneyWanted(prof)
         if why then table.insert(list, { stage = 0, tourney = true, kind = "tourney", why = why }) end
     end
-    -- Infinite drops Lich Portals: worth it while an evolution waits on Lich Ooze    local wantPortal = CFG.lich and C.Catalog.PORTAL and (tonumber(prof.items and prof.items[C.Catalog.PORTAL.item]) or 0) == 0
+    -- Infinite drops Lich Portals: worth it while an evolution waits on Lich Ooze
+    local wantPortal = CFG.lich and C.Catalog.PORTAL and (tonumber(prof.items and prof.items[C.Catalog.PORTAL.item]) or 0) == 0
         and ((B.evoNeeds or {}).lichportal or (CFG.lichHunt and not C.M.ownsAny({ "Lich", "JakeTheLich" })))
     if CFG.infinite or wantPortal then
         for _, w in ipairs(C.Catalog.WORLDS) do
@@ -1996,7 +1997,8 @@ function HUB.feed()
     local res, err = SF.request("Feed", C.R("Feed"), best, ids, next(items) and items or nil)
     if type(res) == "table" and res.ok then
         HUB.apply(res)
-        local nu = HUB.prof.units[best]        B.totals.feeds = B.totals.feeds + 1
+        local nu = HUB.prof.units[best]
+        B.totals.feeds = B.totals.feeds + 1
         local msg = string.format("%s LV %d→%d (+%d xp: %d units%s%s)%s", target.kind, target.level or 1, nu and nu.level or 0, gain, #ids,
             items.bigcandy and (", " .. items.bigcandy .. " big candy") or "", items.candy and (", " .. items.candy .. " candy") or "", why)
         SF.log(1, "FEED", msg)
@@ -2995,7 +2997,8 @@ function MT.cost(kind, lvl)
     return math.floor((row.cost or 0) * MT.mults(kind).cost + 0.5)
 end
 -- road coverage of a spot: path samples within range. Earlier samples weigh more (enemies die sooner →
--- waves clear faster → maps finish faster). Road past where enemies actually get to (MT.reachCut, learned-- from live enemy positions) counts only a little: a hero there never gets a target.
+-- waves clear faster → maps finish faster). Road past where enemies actually get to (MT.reachCut, learned
+-- from live enemy positions) counts only a little: a hero there never gets a target.
 -- placement styles (the same as the battle sim's SIM.STRATS): weight of a road sample by how far down the
 -- road it is (f = 0 entrance … 1 exit). The tournament uses the one its planner scored best
 C.STRATS = {
@@ -3994,7 +3997,8 @@ function MT.finish()
     if CFG.normalLoop and pick and pick.manual and not MT.infinite and not MT.raid and not MT.tourney and not MT.portal then
         if tonumber(pick.stage) == tonumber(MT.stage) and not mode.challenge then
             action = "again"
-            why = "Selected Stage Loop · replaying the same normal act"        else
+            why = "Selected Stage Loop · replaying the same normal act"
+        else
             action = "home"
             why = "Selected Stage Loop · switching to the chosen World / Act"
         end
@@ -4993,7 +4997,8 @@ function GUI.build()
     end
 
     T = Win:Tab("⚙️", "Settings")
-    tog(T, "Anti-AFK", "Send an input when Roblox flags you idle", "antiAfk")    T:Section("Help improve the script")
+    tog(T, "Anti-AFK", "Send an input when Roblox flags you idle", "antiAfk")
+    T:Section("Help improve the script")
     -- flipping it yourself is remembered as your choice (a new default never overrides it)
     UI.shareStats = T:Toggle("Share anonymous stats", "Send match stats to the script author so the hero scores and placements improve for everyone (on by default — switch off any time)", CFG.shareStats, function(on)
         if on ~= CFG.shareStats then CFG.shareChosen = true end
