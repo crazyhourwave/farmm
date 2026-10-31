@@ -1,5 +1,5 @@
 --[[
-    🍬 Candy Kingdom Defense — Smart Farm v1.8.4  (NexusLib)
+    🍬 Candy Kingdom Defense — Smart Farm v1.8.5  (NexusLib)
 
     One script for both places of the game:
       • Lobby (Tree Fort):  rewards → feed → traits/stats → summon → pick the best mode → launch
@@ -13,10 +13,15 @@
 
 -- claim the "running" slot synchronously, before any yield, so two queued loaders can't both start
 if _G.CKD_SF and _G.CKD_SF.alive then return end
-local VERSION = "1.8.4"
+local VERSION = "1.8.5"
 -- what changed, newest first (Updates tab; a one-time notice when a player first runs a new version)
 -- items: { icon, title, text, tag = NEW | IMPROVED | FIX }
 local CHANGELOG = {
+    { v = "1.8.5", date = "Oct 31, 2026", title = "Infinite Instant Skip", items = {
+        { "⚡", "Instant Skip works in Infinite", "Removed the old Infinite-mode block that prevented Smart Farm from pressing Skip Wave.", "FIX" },
+        { "♾️", "Dedicated Infinite retry", "Infinite asks for the next wave every ~0.25s until the server allows it, without the normal request backoff.", "NEW" },
+        { "🛡️", "Normal mode unchanged", "The working v1.8 normal-stage Instant Auto Skip behavior is preserved.", "IMPROVED" },
+    } },
     { v = "1.8.4", date = "Oct 31, 2026", title = "Manual Infinite Picker", items = {
         { "♾️", "Infinite added to Act picker", "World / Act now includes Infinite after the normal story acts.", "NEW" },
         { "🗺️", "World-specific Infinite", "The selected world launches its own Infinite stage when that mode is unlocked.", "NEW" },
@@ -3409,16 +3414,47 @@ end
 -- (few enemies alive, none far down the road, no leaks this run). How aggressive is learned per stage:
 -- a leak after early calls makes it more careful, a clean win with early calls bolder.
 function MT.callWave(now)
-    if not (CFG.earlyCall and MT.running) or MT.over or MT.infinite then return end
-    if MT.waves and MT.wave >= MT.waves then return end
+    if not MT.running or MT.over then return end
+    if not CFG.instantSkip and not CFG.earlyCall then return end
+    if not MT.infinite and MT.waves and MT.wave >= MT.waves then return end
     if not MT.enemyFolder then return end
 
     local alive, reach = MT.alive or MT.enemies, MT.reachNow or 1
 
-    -- Instant Auto Skip:
-    -- The old farm intentionally waited 4 seconds after every wave and between calls.
-    -- Here we ask as soon as the current wave has finished spawning. The server still owns
-    -- the real permission/cooldown: if Act("start") is not legal yet, it simply refuses.
+    -- Infinite has its own fast path. Older builds returned above whenever MT.infinite was true,
+    -- so the game's AUTO/countdown handled Infinite by itself and felt slow.
+    -- We repeatedly ask the normal Act("start") action; the server still decides the earliest legal skip.
+    if CFG.instantSkip and MT.infinite then
+        local retry = math.max(0.20, math.min(0.35, tonumber(CFG.instantSkipRetry) or 0.25))
+        if now - (MT.lastInfiniteSkipAt or 0) < retry then return end
+        MT.lastInfiniteSkipAt = now
+
+        local remote = C.R("Act")
+        if not remote then
+            SF.status("Waves", "⚡ Infinite skip · Act remote unavailable")
+            return
+        end
+
+        local ok, res = pcall(function()
+            if remote:IsA("RemoteFunction") then
+                return remote:InvokeServer("start")
+            end
+            remote:FireServer("start")
+            return { ok = true, fired = true }
+        end)
+
+        if ok and (type(res) ~= "table" or res.ok ~= false) then
+            SF.status("Waves", string.format("⚡ Infinite skip request → wave %d", (tonumber(MT.wave) or 0) + 1))
+            SF.log(2, "WAVES", string.format("Infinite instant skip request · wave %s · %d alive", tostring(MT.wave), alive))
+        elseif not ok then
+            SF.log(2, "WAVES", "Infinite skip request error: " .. tostring(res))
+        else
+            SF.status("Waves", "⚡ Infinite skip · waiting for server")
+        end
+        return
+    end
+
+    -- Normal-stage Instant Auto Skip: keep the known-good v1.8 behavior unchanged.
     if CFG.instantSkip then
         local retry = math.max(0.20, tonumber(CFG.instantSkipRetry) or 0.35)
         if now - (MT.lastCallAt or 0) < retry then return end
@@ -3808,6 +3844,7 @@ end
 -- per-run state (a fresh run starts here and after replay / next)
 function MT.resetRun()
     MT.runLeaks, MT.earlyCalls, MT.runReach, MT.waveReach = 0, 0, 0, 0
+    MT.lastInfiniteSkipAt = 0
     MT.paceSum, MT.paceN, MT.paceLast, MT.paceAt = 0, 0, nil, 0
     MT.cdSum, MT.cdN, MT.spanSum, MT.spanN, MT.cdDue, MT.cdStartAt, MT.spanRaw = 0, 0, 0, 0, nil, nil, {}
     -- WaveNextAt: a wave's start sets a new due time; when it has finished spawning the same due time is set
