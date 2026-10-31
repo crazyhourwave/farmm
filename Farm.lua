@@ -1,5 +1,5 @@
 --[[
-    🍬 Candy Kingdom Defense — Smart Farm v1.9.2  (NexusLib)
+    🍬 Candy Kingdom Defense — Smart Farm v2.0.0  (NexusLib)
 
     One script for both places of the game:
       • Lobby (Tree Fort):  rewards → feed → traits/stats → summon → pick the best mode → launch
@@ -13,10 +13,16 @@
 
 -- claim the "running" slot synchronously, before any yield, so two queued loaders can't both start
 if _G.CKD_SF and _G.CKD_SF.alive then return end
-local VERSION = "1.9.2"
+local VERSION = "2.0.0"
 -- what changed, newest first (Updates tab; a one-time notice when a player first runs a new version)
 -- items: { icon, title, text, tag = NEW | IMPROVED | FIX }
 local CHANGELOG = {
+    { v = "2.0.0", date = "Oct 31, 2026", title = "Native Liquid Glass Menu", items = {
+        { "🪟", "NexusLib removed", "Smart Farm now renders its own menu directly; no external UI library is loaded.", "NEW" },
+        { "📊", "Dedicated Stats page", "Traits, stat rolls, Roll Preview and roll history are grouped together so they are easy to find.", "NEW" },
+        { "🫧", "Liquid Glass layout", "Translucent layered panels, soft borders and a clear sidebar replace the old theme and animation system.", "NEW" },
+        { "🧭", "Simpler navigation", "Home, Farm, Units, Stats, Battle, Logs, Updates and Settings are separated by purpose.", "NEW" },
+    } },
     { v = "1.9.2", date = "Oct 31, 2026", title = "Live Resource Totals", items = {
         { "💎", "Resources visible in matches", "Home now shows your current Gems, Candy, Big Candy, Halloween Candy, Bug Milk and Trait Crystals.", "NEW" },
         { "📈", "Rewards update without lobby", "Match rewards are reflected in the totals as soon as the result event is banked into the cached profile.", "NEW" },
@@ -193,7 +199,6 @@ C.HIVE_CACHE = C.FOLDER .. "/hive.json"
 C.DISCORD_INVITE = "https://discord.com/invite/q2VsNj6x"
 -- author's Discord webhook for the opt-in anonymous stats report (empty = reporting unavailable)
 C.WEBHOOK_URL = "https://discord.com/api/webhooks/1564769639739826316/wqQXo7RAmXrIyDqDzDagzwEEVeZiiPalJ6xlnjdvLOoFvgWI6mR1yvI3VGdMrYHPCDQQ"
-C.NEXUS_URL = "https://raw.githubusercontent.com/headshot7535-png/Nexuslib/main/Nexuslib"
 
 -- ============================================================
 --  DEFAULT SETTINGS
@@ -287,10 +292,7 @@ C.DEFAULTS = {
     saveRatio = 0.7,           -- buy an affordable action if it is worth ≥ this share of the best one
     gridStep = 3,
     -- interface
-    uiTheme = 1,               -- 1 Midnight Candy · 2 Obsidian Blue · 3 Emerald Glass · 4 Crimson Night · 5 Frosted Violet
     uiScale = 1.00,            -- whole-window scale
-    uiAnimations = true,       -- tab/card/toast motion
-    uiGlow = true,             -- subtle gradients and accent glow
     -- misc
     antiAfk = true, logConsole = false, logLevel = 1,
     shareStats = true,         -- send anonymous game stats to the script author (Settings → Data & Community turns it off)
@@ -4796,423 +4798,280 @@ end
 local GUI = { UI = {}, LIVE = {} }
 
 function GUI.applyTheme(Lib)
-    local themes = {
-        {
-            name = "Midnight Candy",
-            bg = Color3.fromRGB(11, 13, 24), panel = Color3.fromRGB(17, 20, 34),
-            card = Color3.fromRGB(25, 29, 47), border = Color3.fromRGB(56, 62, 91),
-            accent = Color3.fromRGB(255, 101, 181), accentD = Color3.fromRGB(203, 66, 143),
-            accentBg = Color3.fromRGB(58, 30, 64), text = Color3.fromRGB(248, 249, 255),
-            sub = Color3.fromRGB(164, 172, 196), green = Color3.fromRGB(79, 222, 154),
-            purple = Color3.fromRGB(179, 139, 255), red = Color3.fromRGB(255, 105, 123),
-            orange = Color3.fromRGB(255, 171, 92), gold = Color3.fromRGB(255, 218, 105),
-        },
-        {
-            name = "Obsidian Blue",
-            bg = Color3.fromRGB(8, 13, 22), panel = Color3.fromRGB(13, 21, 34),
-            card = Color3.fromRGB(19, 30, 48), border = Color3.fromRGB(47, 72, 104),
-            accent = Color3.fromRGB(80, 166, 255), accentD = Color3.fromRGB(49, 113, 201),
-            accentBg = Color3.fromRGB(23, 48, 77), text = Color3.fromRGB(241, 247, 255),
-            sub = Color3.fromRGB(151, 171, 196), green = Color3.fromRGB(73, 218, 157),
-            purple = Color3.fromRGB(143, 139, 255), red = Color3.fromRGB(255, 105, 120),
-            orange = Color3.fromRGB(255, 166, 86), gold = Color3.fromRGB(255, 213, 87),
-        },
-        {
-            name = "Emerald Glass",
-            bg = Color3.fromRGB(8, 18, 17), panel = Color3.fromRGB(12, 27, 25),
-            card = Color3.fromRGB(17, 39, 35), border = Color3.fromRGB(48, 86, 76),
-            accent = Color3.fromRGB(73, 230, 169), accentD = Color3.fromRGB(38, 162, 117),
-            accentBg = Color3.fromRGB(25, 65, 53), text = Color3.fromRGB(240, 255, 249),
-            sub = Color3.fromRGB(151, 193, 178), green = Color3.fromRGB(87, 233, 166),
-            purple = Color3.fromRGB(169, 137, 255), red = Color3.fromRGB(255, 110, 124),
-            orange = Color3.fromRGB(255, 178, 92), gold = Color3.fromRGB(247, 218, 94),
-        },
-        {
-            name = "Crimson Night",
-            bg = Color3.fromRGB(20, 9, 14), panel = Color3.fromRGB(31, 13, 20),
-            card = Color3.fromRGB(45, 19, 29), border = Color3.fromRGB(91, 45, 58),
-            accent = Color3.fromRGB(255, 91, 120), accentD = Color3.fromRGB(190, 50, 79),
-            accentBg = Color3.fromRGB(74, 27, 43), text = Color3.fromRGB(255, 245, 248),
-            sub = Color3.fromRGB(200, 157, 170), green = Color3.fromRGB(79, 222, 154),
-            purple = Color3.fromRGB(190, 131, 255), red = Color3.fromRGB(255, 93, 112),
-            orange = Color3.fromRGB(255, 165, 80), gold = Color3.fromRGB(255, 211, 91),
-        },
-        {
-            name = "Frosted Violet",
-            bg = Color3.fromRGB(16, 15, 29), panel = Color3.fromRGB(24, 22, 42),
-            card = Color3.fromRGB(34, 31, 57), border = Color3.fromRGB(72, 67, 108),
-            accent = Color3.fromRGB(171, 126, 255), accentD = Color3.fromRGB(118, 78, 200),
-            accentBg = Color3.fromRGB(52, 40, 82), text = Color3.fromRGB(249, 247, 255),
-            sub = Color3.fromRGB(181, 173, 207), green = Color3.fromRGB(83, 224, 160),
-            purple = Color3.fromRGB(190, 145, 255), red = Color3.fromRGB(255, 109, 130),
-            orange = Color3.fromRGB(255, 176, 96), gold = Color3.fromRGB(255, 222, 112),
-        },
-    }
-    local idx = math.clamp(math.floor(tonumber(CFG.uiTheme) or 1), 1, #themes)
-    CFG.uiTheme = idx
-    local t = themes[idx]
-    GUI.themeName = t.name
-    if Lib.Colors then
-        for k, v in pairs(t) do
-            if k ~= "name" then Lib.Colors[k] = v end
-        end
-    end
-    return t
+    -- v2 uses one native Liquid Glass visual system; no theme layer.
+    return Lib and Lib.Colors
 end
 
-function GUI.decorate(Win, Lib)
-    if not (Win and Win._main and Win._screen and Win._tabs) then return end
-    local TweenService = game:GetService("TweenService")
-    local P = Lib.Colors or {}
-    local main = Win._main
-    local tabs = Win._tabs
-    local anim = CFG.uiAnimations ~= false
-    local glow = CFG.uiGlow ~= false
-
-    local function tw(obj, sec, props, style, dir)
-        if not anim or not obj or not obj.Parent then
-            for k, v in pairs(props) do pcall(function() obj[k] = v end) end
-            return
-        end
-        pcall(function()
-            TweenService:Create(obj, TweenInfo.new(sec or 0.18, style or Enum.EasingStyle.Quint, dir or Enum.EasingDirection.Out), props):Play()
-        end)
-    end
-    local function mix(a, b, t)
-        return Color3.new(a.R + (b.R-a.R)*t, a.G + (b.G-a.G)*t, a.B + (b.B-a.B)*t)
-    end
-
-    local uiScale = main:FindFirstChild("CKD_UI_SCALE") or Instance.new("UIScale")
-    uiScale.Name = "CKD_UI_SCALE"
-    uiScale.Parent = main
-    uiScale.Scale = math.clamp(tonumber(CFG.uiScale) or 1, 0.80, 1.20)
-    GUI.uiScaleObject = uiScale
-
-    local mainCorner = main:FindFirstChildOfClass("UICorner")
-    if mainCorner then mainCorner.CornerRadius = UDim.new(0, 18) end
-    local mainStroke = main:FindFirstChildOfClass("UIStroke")
-    if mainStroke then
-        mainStroke.Color = P.accent
-        mainStroke.Thickness = 1.2
-        mainStroke.Transparency = glow and 0.52 or 0.72
-    end
-    if glow and not main:FindFirstChild("CKD_MainGradient") then
-        local g = Instance.new("UIGradient")
-        g.Name = "CKD_MainGradient"
-        g.Rotation = 35
-        g.Color = ColorSequence.new({
-            ColorSequenceKeypoint.new(0, mix(P.bg, P.accentBg, 0.08)),
-            ColorSequenceKeypoint.new(0.55, P.bg),
-            ColorSequenceKeypoint.new(1, mix(P.bg, P.panel, 0.28)),
-        })
-        g.Parent = main
-    end
-
-    if anim then
-        local targetScale = math.clamp(tonumber(CFG.uiScale) or 1, 0.80, 1.20)
-        uiScale.Scale = math.max(0.72, targetScale - 0.055)
-        tw(uiScale, 0.38, { Scale = targetScale }, Enum.EasingStyle.Back)
-    end
-
-    local any
-    for _, td in pairs(tabs) do any = td break end
-    if not any then return end
-    local tabBar = any.btn and any.btn.Parent
-    local sidebar = tabBar and tabBar.Parent
-    local content = any.page and any.page.Parent
-    if not (sidebar and content) then return end
-
-    sidebar.Size = UDim2.new(0, 188, 1, -24)
-    sidebar.BackgroundColor3 = P.panel
-    content.Position = UDim2.new(0, 202, 0, 70)
-    content.Size = UDim2.new(1, -216, 1, -108)
-
-    if glow and not sidebar:FindFirstChild("CKD_SideGradient") then
-        local sg = Instance.new("UIGradient")
-        sg.Name = "CKD_SideGradient"
-        sg.Rotation = 90
-        sg.Color = ColorSequence.new({
-            ColorSequenceKeypoint.new(0, mix(P.panel, P.accentBg, 0.22)),
-            ColorSequenceKeypoint.new(0.35, P.panel),
-            ColorSequenceKeypoint.new(1, mix(P.panel, P.bg, 0.35)),
-        })
-        sg.Parent = sidebar
-    end
-
-    for _, child in ipairs(sidebar:GetChildren()) do
-        if child:IsA("Frame") and child ~= tabBar and child.Size.Y.Offset >= 50 and child.Position.Y.Offset <= 4 then
-            child.Size = UDim2.new(1, 0, 0, 72)
-            for _, lbl in ipairs(child:GetDescendants()) do
-                if lbl:IsA("TextLabel") then
-                    if lbl.Text:find("CKD") or lbl.Text:find("Candy Kingdom") then
-                        lbl.Text = "SMART FARM"
-                        lbl.TextSize = 16
-                        lbl.Font = Enum.Font.GothamBlack
-                        lbl.TextColor3 = P.text
-                    elseif lbl.Text:find("CONTROL CENTER") or lbl.Text:find("Smart Farm") or lbl.Text:find("v" .. VERSION, 1, true) then
-                        lbl.Text = "CONTROL CENTER  ·  " .. tostring(GUI.themeName or "UI") .. "  ·  v" .. VERSION
-                        lbl.TextSize = 9
-                        lbl.TextColor3 = P.accent
-                    end
-                end
-            end
-        end
-    end
-    -- Move the old title divider below the taller brand block.
-    for _, child in ipairs(sidebar:GetChildren()) do
-        if child:IsA("Frame") and child.Size.Y.Offset == 1 and child.Position.Y.Offset >= 50 and child.Position.Y.Offset <= 74 then
-            child.Position = UDim2.new(child.Position.X.Scale, child.Position.X.Offset, 0, 72)
-        end
-    end
-    if tabBar:IsA("ScrollingFrame") then
-        tabBar.Position = UDim2.new(0, 0, 0, 80)
-        tabBar.Size = UDim2.new(1, 0, 1, -92)
-        tabBar.ScrollBarThickness = 0
-    end
-
-    local statusBar = Win._status and Win._status.Parent
-    if statusBar and statusBar:IsA("Frame") then
-        statusBar.Size = UDim2.new(1, 0, 0, 24)
-        statusBar.Position = UDim2.new(0, 0, 1, -24)
-        statusBar.BackgroundColor3 = P.panel
-    end
-
-    local oldHeader = main:FindFirstChild("CKD_CommandHeader")
-    if oldHeader then oldHeader:Destroy() end
-    local header = Instance.new("Frame")
-    header.Name = "CKD_CommandHeader"
-    header.Size = UDim2.new(1, -216, 0, 54)
-    header.Position = UDim2.new(0, 202, 0, 10)
-    header.BackgroundColor3 = P.card
-    header.BorderSizePixel = 0
-    header.Parent = main
-    Instance.new("UICorner", header).CornerRadius = UDim.new(0, 13)
-    local hs = Instance.new("UIStroke", header)
-    hs.Color = P.border
-    hs.Thickness = 1
-    hs.Transparency = 0.28
-
-    local hGrad = Instance.new("UIGradient", header)
-    hGrad.Rotation = 10
-    hGrad.Color = ColorSequence.new({
-        ColorSequenceKeypoint.new(0, mix(P.card, P.accentBg, glow and 0.22 or 0.08)),
-        ColorSequenceKeypoint.new(1, P.card),
-    })
-
-    local accentLine = Instance.new("Frame", header)
-    accentLine.Size = UDim2.new(0, 4, 0, 28)
-    accentLine.Position = UDim2.new(0, 12, 0.5, -14)
-    accentLine.BackgroundColor3 = P.accent
-    accentLine.BorderSizePixel = 0
-    Instance.new("UICorner", accentLine).CornerRadius = UDim.new(1,0)
-
-    local title = Instance.new("TextLabel", header)
-    title.Name = "Title"
-    title.BackgroundTransparency = 1
-    title.Position = UDim2.new(0, 28, 0, 8)
-    title.Size = UDim2.new(1, -190, 0, 20)
-    title.Text = "Home"
-    title.TextColor3 = P.text
-    title.Font = Enum.Font.GothamBlack
-    title.TextSize = 16
-    title.TextXAlignment = Enum.TextXAlignment.Left
-
-    local sub = Instance.new("TextLabel", header)
-    sub.Name = "Sub"
-    sub.BackgroundTransparency = 1
-    sub.Position = UDim2.new(0, 28, 0, 29)
-    sub.Size = UDim2.new(1, -190, 0, 15)
-    sub.Text = "Live automation command center"
-    sub.TextColor3 = P.sub
-    sub.Font = Enum.Font.Gotham
-    sub.TextSize = 9
-    sub.TextXAlignment = Enum.TextXAlignment.Left
-
-    local chip = Instance.new("TextLabel", header)
-    chip.Name = "PlaceChip"
-    chip.AnchorPoint = Vector2.new(1, 0.5)
-    chip.Position = UDim2.new(1, -14, 0.5, 0)
-    chip.Size = UDim2.new(0, 116, 0, 28)
-    chip.BackgroundColor3 = P.accentBg
-    chip.BorderSizePixel = 0
-    chip.TextColor3 = P.accent
-    chip.Font = Enum.Font.GothamBold
-    chip.TextSize = 10
-    chip.Text = "●  LOBBY"
-    Instance.new("UICorner", chip).CornerRadius = UDim.new(1,0)
-    local chipStroke = Instance.new("UIStroke", chip)
-    chipStroke.Color = P.accentD
-    chipStroke.Transparency = 0.35
-
-    GUI.headerTitle, GUI.headerSub, GUI.headerChip = title, sub, chip
-    local descriptions = {
-        Home = "Live automation command center",
-        Heroes = "Traits, stats, summons, evolution and roster tools",
-        Play = "Route planner, challenges, acts and Infinite",
-        Battle = "Placement, upgrades, abilities and wave control",
-        Logs = "Live activity, diagnostics and run totals",
-        Updates = "Version history and feature changes",
-        Settings = "Interface, behavior and data controls",
-    }
-
-    local function animatePage(td)
-        if not (td and td.page and td.page.Parent) then return end
-        local page = td.page
-        if anim then
-            page.Position = UDim2.new(0, 14, 0, 0)
-            page.ScrollBarImageTransparency = 1
-            tw(page, 0.24, { Position = UDim2.new(0,0,0,0), ScrollBarImageTransparency = 0.35 })
-        else
-            page.Position = UDim2.new(0,0,0,0)
-        end
-    end
-
-    for name, td in pairs(tabs) do
-        local sc = td.btn:FindFirstChild("CKD_TabScale") or Instance.new("UIScale")
-        sc.Name = "CKD_TabScale"
-        sc.Parent = td.btn
-        td.btn.Size = UDim2.new(1, 0, 0, 38)
-        local corner = td.btn:FindFirstChildOfClass("UICorner")
-        if corner then corner.CornerRadius = UDim.new(0, 10) end
-        td.indicator.Size = UDim2.new(0, 3, 1, -12)
-        td.indicator.Position = UDim2.new(0, 1, 0, 6)
-
-        Win._track(td.btn.MouseEnter:Connect(function()
-            tw(sc, 0.14, { Scale = 1.025 }, Enum.EasingStyle.Quad)
-        end))
-        Win._track(td.btn.MouseLeave:Connect(function()
-            tw(sc, 0.14, { Scale = 1.00 }, Enum.EasingStyle.Quad)
-        end))
-        Win._track(td.btn.Activated:Connect(function()
-            task.defer(function()
-                if not td.page.Parent then return end
-                title.Text = name
-                sub.Text = descriptions[name] or "Smart Farm"
-                animatePage(td)
-                tw(accentLine, 0.18, { Size = UDim2.new(0, 4, 0, 34) }, Enum.EasingStyle.Back)
-                task.delay(0.18, function()
-                    if accentLine.Parent then tw(accentLine, 0.16, { Size = UDim2.new(0,4,0,28) }) end
-                end)
-            end)
-        end))
-    end
-
-    for _, td in pairs(tabs) do
-        td.page.ScrollBarThickness = 2
-        td.page.ScrollBarImageColor3 = P.accent
-        for _, card in ipairs(td.page:GetChildren()) do
-            if card:IsA("Frame") and card.BackgroundTransparency < 0.99 and card.Size.Y.Offset >= 24 then
-                local corner = card:FindFirstChildOfClass("UICorner")
-                if corner then corner.CornerRadius = UDim.new(0, 12) end
-                local stroke = card:FindFirstChildOfClass("UIStroke")
-                if stroke then
-                    stroke.Color = P.border
-                    stroke.Transparency = 0.30
-                end
-                if glow and not card:FindFirstChild("CKD_CardGradient") then
-                    local cg = Instance.new("UIGradient")
-                    cg.Name = "CKD_CardGradient"
-                    cg.Rotation = 90
-                    cg.Color = ColorSequence.new({
-                        ColorSequenceKeypoint.new(0, mix(P.card, P.accentBg, 0.07)),
-                        ColorSequenceKeypoint.new(1, P.card),
-                    })
-                    cg.Parent = card
-                end
-                local scale = card:FindFirstChild("CKD_HoverScale") or Instance.new("UIScale")
-                scale.Name = "CKD_HoverScale"
-                scale.Parent = card
-                Win._track(card.MouseEnter:Connect(function()
-                    tw(scale, 0.13, { Scale = 1.008 }, Enum.EasingStyle.Quad)
-                    if stroke then tw(stroke, 0.13, { Transparency = 0.08 }) end
-                end))
-                Win._track(card.MouseLeave:Connect(function()
-                    tw(scale, 0.13, { Scale = 1.000 }, Enum.EasingStyle.Quad)
-                    if stroke then tw(stroke, 0.13, { Transparency = 0.30 }) end
-                end))
-                local clicker = card:FindFirstChildWhichIsA("TextButton", true)
-                if clicker then
-                    Win._track(clicker.Activated:Connect(function()
-                        if not anim then return end
-                        tw(scale, 0.07, { Scale = 0.985 }, Enum.EasingStyle.Quad)
-                        task.delay(0.075, function()
-                            if scale.Parent then tw(scale, 0.15, { Scale = 1.008 }, Enum.EasingStyle.Back) end
-                        end)
-                    end))
-                end
-            end
-        end
-    end
-
-    local baseNotify = Win.Notify
-    function Win:Notify(a, b, c, d)
-        local toast = baseNotify(self, a, b, c, d)
-        if toast and toast.Parent and anim then
-            local scale = Instance.new("UIScale")
-            scale.Scale = 0.88
-            scale.Parent = toast
-            tw(scale, 0.22, { Scale = 1 }, Enum.EasingStyle.Back)
-        end
-        return toast
-    end
-
-    task.spawn(function()
-        local pulse = false
-        while SF.alive and main.Parent and header.Parent do
-            local inMatch = SF.where == "match"
-            chip.Text = inMatch and "●  MATCH LIVE" or "●  LOBBY"
-            chip.TextColor3 = inMatch and P.green or P.accent
-            chip.BackgroundColor3 = inMatch and mix(P.panel, P.green, 0.16) or P.accentBg
-            if anim and glow then
-                pulse = not pulse
-                tw(accentLine, 0.65, { BackgroundTransparency = pulse and 0.05 or 0.35 }, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut)
-            end
-            task.wait(0.7)
-        end
-    end)
-
-    task.defer(function()
-        local td = tabs.Home
-        if td then
-            title.Text = "Home"
-            sub.Text = descriptions.Home
-            animatePage(td)
-        end
-    end)
+function GUI.decorate()
+    -- Intentionally empty. v2 has no post-build animation/decorating layer.
 end
 
 function GUI.load()
-    local function try(src, from)
-        if type(src) ~= "string" or #src == 0 then return nil end
-        local fn, err = loadstring(src)
-        if not fn then warn("[CKD] NexusLib (" .. from .. ") compile error: " .. tostring(err)) return nil end
-        local ok, lib = pcall(fn)
-        if ok and type(lib) == "table" and type(lib.Window) == "function" then return lib end
-        return nil
+    local UIS = game:GetService("UserInputService")
+    local C = {
+        bg = Color3.fromRGB(8, 13, 22), panel = Color3.fromRGB(17, 26, 40),
+        card = Color3.fromRGB(28, 40, 58), border = Color3.fromRGB(104, 130, 166),
+        accent = Color3.fromRGB(112, 192, 255), accentD = Color3.fromRGB(57, 132, 210),
+        accentBg = Color3.fromRGB(27, 72, 111), text = Color3.fromRGB(246, 250, 255),
+        sub = Color3.fromRGB(165, 181, 205), green = Color3.fromRGB(91, 228, 166),
+        purple = Color3.fromRGB(190, 149, 255), red = Color3.fromRGB(255, 105, 128),
+        orange = Color3.fromRGB(255, 183, 102), gold = Color3.fromRGB(255, 220, 112),
+    }
+
+    local function corner(o, r)
+        local x = Instance.new("UICorner"); x.CornerRadius = UDim.new(0, r or 12); x.Parent = o
     end
-    local okR, src = pcall(function() return isfile("NexusLib.lua") and readfile("NexusLib.lua") or nil end)
-    local lib = okR and try(src, "file")
-    if lib then return lib end
-    local ok, s = pcall(function() return game:HttpGet(C.NEXUS_URL) end)
-    return ok and try(s, "url") or nil
+    local function stroke(o, color, tr)
+        local x = Instance.new("UIStroke"); x.Color = color or C.border; x.Transparency = tr == nil and 0.55 or tr; x.Thickness = 1; x.Parent = o
+    end
+    local function glass(parent, color, tr, r)
+        local f = Instance.new("Frame")
+        f.BackgroundColor3 = color or C.card; f.BackgroundTransparency = tr == nil and 0.18 or tr
+        f.BorderSizePixel = 0; f.Parent = parent; corner(f, r or 12); stroke(f)
+        local g = Instance.new("UIGradient"); g.Rotation = 105
+        g.Color = ColorSequence.new(Color3.fromRGB(43, 57, 78), color or C.card); g.Parent = f
+        return f
+    end
+    local function label(parent, txt, sz, col, font)
+        local l = Instance.new("TextLabel")
+        l.BackgroundTransparency = 1; l.Text = tostring(txt or ""); l.TextColor3 = col or C.text
+        l.Font = font or Enum.Font.Gotham; l.TextSize = sz or 10
+        l.TextXAlignment = Enum.TextXAlignment.Left; l.TextYAlignment = Enum.TextYAlignment.Center
+        l.Parent = parent; return l
+    end
+
+    local Lib = { Colors = C }
+
+    function Lib:Window(cfg)
+        cfg = cfg or {}
+        local pg = LP:FindFirstChildOfClass("PlayerGui") or LP:WaitForChild("PlayerGui")
+        local old = pg:FindFirstChild("CKD_LiquidGlass"); if old then old:Destroy() end
+
+        local screen = Instance.new("ScreenGui")
+        screen.Name = "CKD_LiquidGlass"; screen.ResetOnSpawn = false; screen.DisplayOrder = 100000
+        screen.ZIndexBehavior = Enum.ZIndexBehavior.Sibling; screen.Parent = pg
+
+        local main = glass(screen, C.bg, 0.08, 20)
+        main.Size = UDim2.fromOffset(cfg.width or 1040, cfg.height or 680)
+        main.AnchorPoint = Vector2.new(0.5,0.5); main.Position = UDim2.fromScale(0.5,0.5); main.ClipsDescendants = true
+        local scl = Instance.new("UIScale"); scl.Scale = math.clamp(tonumber(CFG.uiScale) or 1, 0.8, 1.2); scl.Parent = main
+        GUI.uiScaleObject = scl
+
+        local top = glass(main, C.panel, 0.12, 0)
+        top.Size = UDim2.new(1,0,0,72)
+        local tc = top:FindFirstChildOfClass("UICorner"); if tc then tc:Destroy() end
+
+        local brand = glass(top, C.accentBg, 0.05, 13)
+        brand.Size = UDim2.fromOffset(44,44); brand.Position = UDim2.fromOffset(16,14)
+        local bt = label(brand, "SF", 14, C.accent, Enum.Font.GothamBlack); bt.Size = UDim2.fromScale(1,1); bt.TextXAlignment = Enum.TextXAlignment.Center
+
+        local ttl = label(top, cfg.title or "CKD Smart Farm", 18, C.text, Enum.Font.GothamBlack)
+        ttl.Position = UDim2.fromOffset(72,12); ttl.Size = UDim2.new(1,-300,0,24)
+        local sub = label(top, cfg.subtitle or ("Liquid Glass · v"..VERSION), 9, C.sub, Enum.Font.GothamMedium)
+        sub.Position = UDim2.fromOffset(73,38); sub.Size = UDim2.new(1,-300,0,18)
+
+        local place = glass(top, C.accentBg, 0.05, 999); place.Size = UDim2.fromOffset(112,30); place.Position = UDim2.new(1,-166,0,21)
+        local placeTxt = label(place, "●  LOBBY", 10, C.accent, Enum.Font.GothamBold); placeTxt.Size = UDim2.fromScale(1,1); placeTxt.TextXAlignment = Enum.TextXAlignment.Center
+
+        local mini = Instance.new("TextButton"); mini.Size = UDim2.fromOffset(32,32); mini.Position = UDim2.new(1,-45,0,20)
+        mini.BackgroundColor3 = C.card; mini.BackgroundTransparency = 0.12; mini.BorderSizePixel = 0; mini.Text = "—"
+        mini.TextColor3 = C.text; mini.Font = Enum.Font.GothamBold; mini.TextSize = 15; mini.AutoButtonColor = false; mini.Parent = top
+        corner(mini,10); stroke(mini)
+
+        local side = glass(main, C.panel, 0.16, 0); side.Position = UDim2.fromOffset(0,72); side.Size = UDim2.new(0,190,1,-100)
+        local cc = side:FindFirstChildOfClass("UICorner"); if cc then cc:Destroy() end
+        local nt = label(side, "NAVIGATION", 9, C.sub, Enum.Font.GothamBold); nt.Position = UDim2.fromOffset(14,10); nt.Size = UDim2.new(1,-28,0,20)
+
+        local nav = Instance.new("ScrollingFrame")
+        nav.BackgroundTransparency = 1; nav.BorderSizePixel = 0; nav.Position = UDim2.fromOffset(10,38); nav.Size = UDim2.new(1,-20,1,-48)
+        nav.AutomaticCanvasSize = Enum.AutomaticSize.Y; nav.CanvasSize = UDim2.new(); nav.ScrollBarThickness = 0; nav.Parent = side
+        local nl = Instance.new("UIListLayout"); nl.Padding = UDim.new(0,6); nl.SortOrder = Enum.SortOrder.LayoutOrder; nl.Parent = nav
+
+        local head = glass(main, C.card, 0.16, 14); head.Position = UDim2.fromOffset(204,84); head.Size = UDim2.new(1,-218,0,58)
+        local pageTitle = label(head, "Home", 16, C.text, Enum.Font.GothamBlack); pageTitle.Position = UDim2.fromOffset(16,7); pageTitle.Size = UDim2.new(1,-32,0,22)
+        local pageSub = label(head, "Overview and current resources", 9, C.sub, Enum.Font.GothamMedium); pageSub.Position = UDim2.fromOffset(16,31); pageSub.Size = UDim2.new(1,-32,0,17)
+
+        local content = Instance.new("Frame"); content.BackgroundTransparency = 1; content.Position = UDim2.fromOffset(204,152)
+        content.Size = UDim2.new(1,-218,1,-190); content.ClipsDescendants = true; content.Parent = main
+
+        local status = glass(main, C.panel, 0.12, 0); status.Position = UDim2.new(0,0,1,-28); status.Size = UDim2.new(1,0,0,28)
+        local stc = status:FindFirstChildOfClass("UICorner"); if stc then stc:Destroy() end
+        local dot = Instance.new("Frame"); dot.Size = UDim2.fromOffset(7,7); dot.Position = UDim2.fromOffset(14,10); dot.BackgroundColor3 = C.green; dot.BorderSizePixel = 0; dot.Parent = status; corner(dot,999)
+        local st = label(status, "Ready", 9, C.sub, Enum.Font.GothamMedium); st.Position = UDim2.fromOffset(29,4); st.Size = UDim2.new(1,-42,0,20)
+
+        local Win = { _screen=screen, _main=main, _status=st, _tabs={}, _conns={} }
+        function Win._track(cn) table.insert(Win._conns, cn); return cn end
+
+        local descriptions = {
+            Home="Overview, resources and current farm status", Farm="Worlds, Acts, Infinite, challenges and modes",
+            Units="Summoning, evolution, feeding, storage and rewards", Stats="Traits, stat rolls, Roll Preview and history",
+            Battle="Placement, upgrades, abilities, targeting and Auto Skip", Logs="Live activity, totals and diagnostics",
+            Updates="Version history and changes", Settings="Window scale, anti-AFK and data controls",
+        }
+        local active
+        local function select(name)
+            local td = Win._tabs[name]; if not td then return end; active = name
+            pageTitle.Text = name; pageSub.Text = descriptions[name] or "Smart Farm"
+            for n,t in pairs(Win._tabs) do
+                local on = n == name; t.page.Visible = on; t.bar.Visible = on
+                t.btn.BackgroundColor3 = on and C.accentBg or C.card; t.btn.BackgroundTransparency = on and 0.03 or 0.28
+                t.name.TextColor3 = on and C.text or C.sub; t.icon.TextColor3 = on and C.accent or C.sub
+            end
+        end
+
+        function Win:Tab(iconText, name)
+            if name == nil then name, iconText = tostring(iconText), "" end
+            name, iconText = tostring(name), tostring(iconText or "")
+            local b = glass(nav, C.card, 0.28, 10); b.Size = UDim2.new(1,0,0,42)
+            local click = Instance.new("TextButton"); click.BackgroundTransparency = 1; click.Text = ""; click.Size = UDim2.fromScale(1,1); click.Parent = b
+            local bar = Instance.new("Frame"); bar.Size = UDim2.fromOffset(3,24); bar.Position = UDim2.fromOffset(3,9); bar.BackgroundColor3 = C.accent; bar.BorderSizePixel = 0; bar.Visible = false; bar.Parent = b; corner(bar,999)
+            local il = label(b, iconText, 14, C.sub, Enum.Font.GothamMedium); il.Position = UDim2.fromOffset(13,0); il.Size = UDim2.fromOffset(26,42); il.TextXAlignment = Enum.TextXAlignment.Center
+            local nm = label(b, name, 11, C.sub, Enum.Font.GothamBold); nm.Position = UDim2.fromOffset(45,0); nm.Size = UDim2.new(1,-54,1,0)
+
+            local page = Instance.new("ScrollingFrame"); page.BackgroundTransparency = 1; page.BorderSizePixel = 0; page.Size = UDim2.fromScale(1,1)
+            page.AutomaticCanvasSize = Enum.AutomaticSize.Y; page.CanvasSize = UDim2.new(); page.ScrollBarThickness = 3; page.ScrollBarImageColor3 = C.accent; page.Visible = false; page.Parent = content
+            local pl = Instance.new("UIListLayout"); pl.Padding = UDim.new(0,8); pl.SortOrder = Enum.SortOrder.LayoutOrder; pl.HorizontalAlignment = Enum.HorizontalAlignment.Center; pl.Parent = page
+            local pp = Instance.new("UIPadding"); pp.PaddingTop = UDim.new(0,2); pp.PaddingBottom = UDim.new(0,12); pp.PaddingRight = UDim.new(0,4); pp.Parent = page
+
+            Win._tabs[name] = {btn=b,bar=bar,icon=il,name=nm,page=page}; Win._track(click.Activated:Connect(function() select(name) end))
+            if not active then select(name) end
+
+            local T, order = { _page=page }, 0
+            local function nextOrder() order += 1; return order end
+            local function row(h)
+                local r = glass(page, C.card, 0.20, 12); r.Size = UDim2.new(1,-8,0,h or 54); r.LayoutOrder = nextOrder(); return r
+            end
+
+            function T:Section(txt)
+                local f = Instance.new("Frame"); f.BackgroundTransparency=1; f.Size=UDim2.new(1,-8,0,30); f.LayoutOrder=nextOrder(); f.Parent=page
+                local l=label(f,txt,10,C.accent,Enum.Font.GothamBlack); l.Position=UDim2.fromOffset(4,5); l.Size=UDim2.new(1,-8,0,20); return f
+            end
+            function T:Toggle(a,d,default,cb)
+                local state=default==true; local r=row(58)
+                local x=label(r,a,12,C.text,Enum.Font.GothamBold); x.Position=UDim2.fromOffset(14,7); x.Size=UDim2.new(1,-120,0,20)
+                local y=label(r,d or "",9,C.sub); y.Position=UDim2.fromOffset(14,29); y.Size=UDim2.new(1,-120,0,17); y.TextTruncate=Enum.TextTruncate.AtEnd
+                local p=Instance.new("TextButton"); p.Size=UDim2.fromOffset(68,30); p.Position=UDim2.new(1,-82,0.5,-15); p.BorderSizePixel=0; p.Font=Enum.Font.GothamBold; p.TextSize=10; p.AutoButtonColor=false; p.Parent=r; corner(p,999)
+                local function draw() p.Text=state and "ON" or "OFF"; p.BackgroundColor3=state and C.accentD or C.panel; p.TextColor3=state and C.text or C.sub end
+                local function set(v,silent) state=v==true; draw(); if not silent and cb then pcall(cb,state) end end
+                draw(); Win._track(p.Activated:Connect(function() set(not state,false) end))
+                return {Set=set,Get=function() return state end}
+            end
+            function T:Slider(a,d,o,cb)
+                if type(d)=="table" and cb==nil then cb,o,d=o,d,"" end; o=o or {}
+                local mn,mx,step=tonumber(o.min) or 0,tonumber(o.max) or 100,tonumber(o.step) or 1; local v=math.clamp(tonumber(o.default) or mn,mn,mx)
+                local r=row(72); local x=label(r,a,12,C.text,Enum.Font.GothamBold); x.Position=UDim2.fromOffset(14,6); x.Size=UDim2.new(1,-110,0,20)
+                local y=label(r,d or "",9,C.sub); y.Position=UDim2.fromOffset(14,27); y.Size=UDim2.new(1,-120,0,16); y.TextTruncate=Enum.TextTruncate.AtEnd
+                local vl=label(r,"",11,C.accent,Enum.Font.Code); vl.Position=UDim2.new(1,-92,0,7); vl.Size=UDim2.fromOffset(76,18); vl.TextXAlignment=Enum.TextXAlignment.Right
+                local tr=Instance.new("Frame"); tr.Position=UDim2.fromOffset(14,53); tr.Size=UDim2.new(1,-28,0,6); tr.BackgroundColor3=C.panel; tr.BorderSizePixel=0; tr.Parent=r; corner(tr,999)
+                local fi=Instance.new("Frame"); fi.BackgroundColor3=C.accent; fi.BorderSizePixel=0; fi.Parent=tr; corner(fi,999)
+                local hit=Instance.new("TextButton"); hit.BackgroundTransparency=1; hit.Text=""; hit.Size=UDim2.new(1,0,0,24); hit.Position=UDim2.new(0,0,0.5,-12); hit.Parent=tr
+                local drag=false
+                local function fmt(q) if type(o.format)=="function" then local ok,z=pcall(o.format,q); if ok then return tostring(z) end end return tostring(q) end
+                local function draw() local q=mx>mn and (v-mn)/(mx-mn) or 0; fi.Size=UDim2.new(q,0,1,0); vl.Text=fmt(v) end
+                local function set(q,silent) q=math.clamp(tonumber(q) or mn,mn,mx); q=mn+math.round((q-mn)/step)*step; v=math.clamp(q,mn,mx); draw(); if not silent and cb then pcall(cb,v) end end
+                local function at(px) local q=math.clamp((px-tr.AbsolutePosition.X)/math.max(1,tr.AbsoluteSize.X),0,1); set(mn+(mx-mn)*q,false) end
+                Win._track(hit.InputBegan:Connect(function(i) if i.UserInputType==Enum.UserInputType.MouseButton1 or i.UserInputType==Enum.UserInputType.Touch then drag=true; at(i.Position.X) end end))
+                Win._track(UIS.InputChanged:Connect(function(i) if drag and (i.UserInputType==Enum.UserInputType.MouseMovement or i.UserInputType==Enum.UserInputType.Touch) then at(i.Position.X) end end))
+                Win._track(UIS.InputEnded:Connect(function(i) if i.UserInputType==Enum.UserInputType.MouseButton1 or i.UserInputType==Enum.UserInputType.Touch then drag=false end end))
+                draw(); return {Set=set,Get=function() return v end}
+            end
+            function T:Dropdown(a,d,opts,def,cb)
+                local list={}; for i,z in ipairs(opts or {}) do list[i]=type(z)=="table" and {text=tostring(z.text or z[1] or i),value=z.value~=nil and z.value or z[2] or z} or {text=tostring(z),value=z} end
+                local idx=math.clamp(math.floor(tonumber(def) or 1),1,math.max(1,#list)); local r=row(58)
+                local x=label(r,a,12,C.text,Enum.Font.GothamBold); x.Position=UDim2.fromOffset(14,7); x.Size=UDim2.new(1,-180,0,20)
+                local y=label(r,d or "",9,C.sub); y.Position=UDim2.fromOffset(14,29); y.Size=UDim2.new(1,-180,0,17); y.TextTruncate=Enum.TextTruncate.AtEnd
+                local b=Instance.new("TextButton"); b.Size=UDim2.fromOffset(150,30); b.Position=UDim2.new(1,-164,0.5,-15); b.BackgroundColor3=C.panel; b.BackgroundTransparency=0.1; b.BorderSizePixel=0; b.TextColor3=C.accent; b.Font=Enum.Font.GothamBold; b.TextSize=10; b.AutoButtonColor=false; b.Parent=r; corner(b,9); stroke(b)
+                local menu=glass(page,C.panel,0.05,10); menu.Size=UDim2.new(1,-8,0,0); menu.Visible=false; menu.ClipsDescendants=true; menu.LayoutOrder=nextOrder()
+                local ml=Instance.new("UIListLayout"); ml.Padding=UDim.new(0,4); ml.Parent=menu; local mp=Instance.new("UIPadding"); mp.PaddingTop=UDim.new(0,6); mp.PaddingBottom=UDim.new(0,6); mp.PaddingLeft=UDim.new(0,6); mp.PaddingRight=UDim.new(0,6); mp.Parent=menu
+                local function draw() b.Text=(list[idx] and list[idx].text or "Select").."   ▾" end
+                local function set(i,silent) idx=math.clamp(math.floor(tonumber(i) or 1),1,math.max(1,#list)); draw(); menu.Visible=false; if not silent and cb and list[idx] then pcall(cb,list[idx].text,list[idx].value,idx) end end
+                local function rebuild()
+                    for _,q in ipairs(menu:GetChildren()) do if q:IsA("TextButton") then q:Destroy() end end
+                    local h=12
+                    for i,z in ipairs(list) do local q=Instance.new("TextButton"); q.Size=UDim2.new(1,0,0,30); q.BackgroundColor3=i==idx and C.accentBg or C.card; q.BackgroundTransparency=0.12; q.BorderSizePixel=0; q.Text=z.text; q.TextColor3=i==idx and C.text or C.sub; q.Font=Enum.Font.GothamMedium; q.TextSize=10; q.AutoButtonColor=false; q.Parent=menu; corner(q,8); Win._track(q.Activated:Connect(function() set(i,false) end)); h+=34 end
+                    menu.Size=UDim2.new(1,-8,0,math.min(h,220))
+                end
+                Win._track(b.Activated:Connect(function() if not menu.Visible then rebuild() end; menu.Visible=not menu.Visible end)); draw()
+                return {Set=set,Get=function() return idx end}
+            end
+            function T:Button(ic,a,d,colorOrCb,cb)
+                local color=nil; if type(colorOrCb)=="function" then cb=colorOrCb else color=colorOrCb end
+                local r=row(54); local b=Instance.new("TextButton"); b.Size=UDim2.new(1,-16,1,-12); b.Position=UDim2.fromOffset(8,6); b.BackgroundColor3=color or C.panel; b.BackgroundTransparency=0.08; b.BorderSizePixel=0; b.Text=""; b.AutoButtonColor=false; b.Parent=r; corner(b,10); stroke(b,color or C.border,0.55)
+                local i=label(b,ic or "",14,C.text,Enum.Font.GothamBold); i.Position=UDim2.fromOffset(12,0); i.Size=UDim2.fromOffset(28,42); i.TextXAlignment=Enum.TextXAlignment.Center
+                local x=label(b,a,11,C.text,Enum.Font.GothamBold); x.Position=UDim2.fromOffset(48,3); x.Size=UDim2.new(1,-60,0,20)
+                local y=label(b,d or "",9,C.sub); y.Position=UDim2.fromOffset(48,22); y.Size=UDim2.new(1,-60,0,16); y.TextTruncate=Enum.TextTruncate.AtEnd
+                Win._track(b.Activated:Connect(function() if cb then pcall(cb) end end)); return b
+            end
+            function T:Label(txt)
+                local r=row(38); local l=label(r,txt,10,C.text,Enum.Font.GothamMedium); l.Position=UDim2.fromOffset(12,0); l.Size=UDim2.new(1,-24,1,0); return {Set=function(v) l.Text=tostring(v or "") end}
+            end
+            function T:Paragraph(txt)
+                local r=row(76); local l=label(r,txt,9,C.sub); l.Position=UDim2.fromOffset(12,8); l.Size=UDim2.new(1,-24,1,-16); l.TextWrapped=true; l.TextYAlignment=Enum.TextYAlignment.Top; return {Set=function(v) l.Text=tostring(v or "") end}
+            end
+            function T:Input(a,d,ph,default,cb)
+                local r=row(78); local x=label(r,a,12,C.text,Enum.Font.GothamBold); x.Position=UDim2.fromOffset(14,5); x.Size=UDim2.new(1,-28,0,18)
+                local y=label(r,d or "",9,C.sub); y.Position=UDim2.fromOffset(14,24); y.Size=UDim2.new(1,-28,0,15)
+                local box=Instance.new("TextBox"); box.Position=UDim2.fromOffset(14,45); box.Size=UDim2.new(1,-28,0,25); box.BackgroundColor3=C.panel; box.BackgroundTransparency=0.1; box.BorderSizePixel=0; box.Text=tostring(default or ""); box.PlaceholderText=tostring(ph or ""); box.TextColor3=C.text; box.PlaceholderColor3=C.sub; box.Font=Enum.Font.Gotham; box.TextSize=10; box.ClearTextOnFocus=false; box.Parent=r; corner(box,8); stroke(box)
+                Win._track(box:GetPropertyChangedSignal("Text"):Connect(function() if cb then pcall(cb,box.Text) end end))
+                local p={_isProxy=true}; function p:Get() return box.Text end; function p:Set(v) box.Text=tostring(v or "") end; return p
+            end
+            function T:StatusCard(o)
+                o=o or {}; local r=row(96); local ic=label(r,o.icon or "•",20,o.color or C.accent,Enum.Font.GothamBold); ic.Position=UDim2.fromOffset(14,10); ic.Size=UDim2.fromOffset(34,34); ic.TextXAlignment=Enum.TextXAlignment.Center
+                local a=label(r,o.title or "",12,C.text,Enum.Font.GothamBold); a.Position=UDim2.fromOffset(58,8); a.Size=UDim2.new(1,-150,0,20)
+                local b=label(r,o.text or "",9,C.sub); b.Position=UDim2.fromOffset(58,30); b.Size=UDim2.new(1,-72,0,20); b.TextWrapped=true
+                local d=label(r,o.sub or "",8,C.sub); d.Position=UDim2.fromOffset(58,55); d.Size=UDim2.new(1,-72,0,20); d.TextWrapped=true
+                local tag=label(r,o.tag or "",9,o.tagColor or C.accent,Enum.Font.GothamBold); tag.Position=UDim2.new(1,-100,0,9); tag.Size=UDim2.fromOffset(86,18); tag.TextXAlignment=Enum.TextXAlignment.Right
+                local function set(z) if type(z)~="table" then return end; ic.Text=tostring(z.icon or ic.Text); ic.TextColor3=z.color or ic.TextColor3; a.Text=tostring(z.title or ""); b.Text=tostring(z.text or ""); d.Text=tostring(z.sub or ""); tag.Text=tostring(z.tag or ""); tag.TextColor3=z.tagColor or z.color or C.accent end
+                set(o); return {Set=set}
+            end
+            function T:StatGrid(keys,cols)
+                cols=math.max(1,tonumber(cols) or 3); local holder=Instance.new("Frame"); holder.BackgroundTransparency=1; holder.Size=UDim2.new(1,-8,0,math.ceil(#keys/cols)*78); holder.LayoutOrder=nextOrder(); holder.Parent=page
+                local gr=Instance.new("UIGridLayout"); gr.CellPadding=UDim2.fromOffset(8,8); gr.CellSize=UDim2.new(1/cols,-6,0,70); gr.Parent=holder; local cells={}
+                for i,k in ipairs(keys) do local q=glass(holder,C.card,0.20,12); q.LayoutOrder=i; local a=label(q,k,9,C.sub,Enum.Font.GothamBold); a.Position=UDim2.fromOffset(10,6); a.Size=UDim2.new(1,-20,0,16); local v=label(q,"—",16,C.text,Enum.Font.GothamBlack); v.Position=UDim2.fromOffset(10,23); v.Size=UDim2.new(1,-20,0,23); local d=label(q,"",8,C.sub); d.Position=UDim2.fromOffset(10,48); d.Size=UDim2.new(1,-20,0,14); d.TextTruncate=Enum.TextTruncate.AtEnd; cells[k]={v=v,d=d} end
+                return {Set=function(k,v,d,col) local q=cells[k]; if q then q.v.Text=tostring(v or "—"); q.v.TextColor3=typeof(col)=="Color3" and col or C.text; q.d.Text=tostring(d or "") end end}
+            end
+            function T:KeyValue(keys,width)
+                local h=glass(page,C.card,0.20,12); h.Size=UDim2.new(1,-8,0,#keys*34+12); h.LayoutOrder=nextOrder(); local ll=Instance.new("UIListLayout"); ll.Padding=UDim.new(0,2); ll.Parent=h; local pd=Instance.new("UIPadding"); pd.PaddingTop=UDim.new(0,6); pd.PaddingBottom=UDim.new(0,6); pd.PaddingLeft=UDim.new(0,8); pd.PaddingRight=UDim.new(0,8); pd.Parent=h; local rows={}
+                for i,k in ipairs(keys) do local r=Instance.new("Frame"); r.BackgroundTransparency=1; r.Size=UDim2.new(1,0,0,32); r.LayoutOrder=i; r.Parent=h; local a=label(r,k,9,C.sub,Enum.Font.GothamBold); a.Size=UDim2.fromOffset(width or 100,32); local v=label(r,"—",9,C.text,Enum.Font.GothamMedium); v.Position=UDim2.fromOffset((width or 100)+8,0); v.Size=UDim2.new(1,-(width or 100)-8,1,0); v.TextWrapped=true; rows[k]={a=a,v=v} end
+                return {Set=function(k,v,col,alt) local q=rows[k]; if q then q.v.Text=tostring(v or ""); q.v.TextColor3=typeof(col)=="Color3" and col or C.text; if alt~=nil then q.a.Text=tostring(alt) end end end}
+            end
+            return T
+        end
+
+        function Win:Status(msg,col) st.Text=tostring(msg or ""); if typeof(col)=="Color3" then dot.BackgroundColor3=col end end
+        function Win:Notify(t,m,duration,kind)
+            local q=glass(screen,C.panel,0.05,12); q.Size=UDim2.fromOffset(300,72); q.Position=UDim2.new(1,-318,1,-92); q.ZIndex=100
+            local col=kind=="success" and C.green or kind=="warning" and C.orange or kind=="error" and C.red or C.accent
+            local a=label(q,t or "Smart Farm",11,col,Enum.Font.GothamBold); a.Position=UDim2.fromOffset(14,8); a.Size=UDim2.new(1,-28,0,20); a.ZIndex=101
+            local b=label(q,m or "",9,C.text); b.Position=UDim2.fromOffset(14,30); b.Size=UDim2.new(1,-28,0,34); b.TextWrapped=true; b.ZIndex=101
+            task.delay(tonumber(duration) or 4,function() pcall(function() q:Destroy() end) end); return q
+        end
+        function Win:SetVisible(v) main.Visible=v==true end; function Win:Show() main.Visible=true end; function Win:Hide() main.Visible=false end
+        function Win:Toggle() main.Visible=not main.Visible end; function Win:IsVisible() return main.Visible end
+        function Win:SelectTab(n) select(n); return Win._tabs[n]~=nil end; function Win:IsDestroyed() return not screen.Parent end
+        function Win:Destroy() for _,cn in ipairs(Win._conns) do pcall(function() cn:Disconnect() end) end; if screen.Parent then screen:Destroy() end end
+
+        local dragging,dragStart,startPos
+        Win._track(top.InputBegan:Connect(function(i) if i.UserInputType==Enum.UserInputType.MouseButton1 or i.UserInputType==Enum.UserInputType.Touch then dragging=true; dragStart=i.Position; startPos=main.Position end end))
+        Win._track(UIS.InputChanged:Connect(function(i) if dragging and (i.UserInputType==Enum.UserInputType.MouseMovement or i.UserInputType==Enum.UserInputType.Touch) then local d=i.Position-dragStart; main.Position=UDim2.new(startPos.X.Scale,startPos.X.Offset+d.X,startPos.Y.Scale,startPos.Y.Offset+d.Y) end end))
+        Win._track(UIS.InputEnded:Connect(function(i) if i.UserInputType==Enum.UserInputType.MouseButton1 or i.UserInputType==Enum.UserInputType.Touch then dragging=false end end))
+        Win._track(mini.Activated:Connect(function() local open=content.Visible; content.Visible=not open; side.Visible=not open; head.Visible=not open; status.Visible=not open; main.Size=open and UDim2.fromOffset(cfg.width or 1040,72) or UDim2.fromOffset(cfg.width or 1040,cfg.height or 680); mini.Text=open and "+" or "—" end))
+        task.spawn(function() while SF.alive and screen.Parent do local m=SF.where=="match"; placeTxt.Text=m and "●  MATCH" or "●  LOBBY"; placeTxt.TextColor3=m and C.green or C.accent; task.wait(0.5) end end)
+
+        return Win
+    end
+    return Lib
 end
 function GUI.build()
     local Lib = GUI.load()
-    if not Lib then warn("[CKD] NexusLib failed to load — running without a window") return end
-    GUI.applyTheme(Lib)
-    local title = "🍬 CKD • Smart Farm"
+    local title = "CKD Smart Farm"
     local Win = Lib:Window({
         title = title,
-        subtitle = "CONTROL CENTER  •  " .. tostring(GUI.themeName or "Theme") .. "  •  v" .. VERSION,
-        width = 980,
-        height = 650,
-        maxNotifications = 6,
+        subtitle = "Native Liquid Glass Control Center  •  v" .. VERSION,
+        width = 1040,
+        height = 680,
     })
     GUI.Win = Win
-    pcall(function()
-        local sg = LP:FindFirstChildOfClass("PlayerGui"):FindFirstChild("NexusLib_" .. title:gsub("%s", ""))
-        if sg then sg.DisplayOrder = 100000 end
-    end)
     local UI, LIVE = GUI.UI, GUI.LIVE
     local function setCfg(k, v) CFG[k] = v; SF.saveSoon() end
     local function tog(T, label, desc, key) UI[key] = T:Toggle(label, desc, CFG[key], function(on) setCfg(key, on) end) end
@@ -5558,7 +5417,6 @@ function GUI.build()
     tog(T, "Learn from the hive", "Blend every player's measured hero damage into the scores (most for heroes you've rarely played)", "useHive")
     T:Button("💾", "Save Settings", "Write " .. C.SETTINGS, function() SF.saveNow(); notify("Saved", "settings written", "success") end)
 
-    pcall(GUI.decorate, Win, Lib)
     Win:Status(CFG.master and "▶ Farming" or "⏸ Paused", CFG.master and (Lib.Colors and Lib.Colors.green) or (Lib.Colors and Lib.Colors.orange))
     task.delay(3, function()
         -- Keep startup safe/light. The expensive getgc/instance scan runs only from the Deep Scan button.
