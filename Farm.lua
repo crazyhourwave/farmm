@@ -1,5 +1,5 @@
 --[[
-    🍬 Candy Kingdom Defense — Smart Farm v2.0.0  (NexusLib)
+    🍬 Candy Kingdom Defense — Smart Farm v2.0.1  (NexusLib)
 
     One script for both places of the game:
       • Lobby (Tree Fort):  rewards → feed → traits/stats → summon → pick the best mode → launch
@@ -13,10 +13,16 @@
 
 -- claim the "running" slot synchronously, before any yield, so two queued loaders can't both start
 if _G.CKD_SF and _G.CKD_SF.alive then return end
-local VERSION = "2.0.0"
+local VERSION = "2.0.1"
 -- what changed, newest first (Updates tab; a one-time notice when a player first runs a new version)
 -- items: { icon, title, text, tag = NEW | IMPROVED | FIX }
 local CHANGELOG = {
+    { v = "2.0.1", date = "Oct 31, 2026", title = "Liquid Glass Shell Fix", items = {
+        { "📐", "Auto-fit to your screen", "The window now scales itself down when Roblox's viewport is smaller than the menu.", "FIX" },
+        { "🖱️", "Reliable dragging", "Drag from the title bar or page header, with hard screen bounds so the menu cannot disappear off-screen.", "FIX" },
+        { "🪟", "Compact glass layout", "Reduced wasted vertical space and tightened the shell so more controls fit on-screen.", "IMPROVED" },
+        { "➕", "Safer minimize", "The minimized bar stays reachable and restores to a clamped on-screen position.", "IMPROVED" },
+    } },
     { v = "2.0.0", date = "Oct 31, 2026", title = "Native Liquid Glass Menu", items = {
         { "🪟", "NexusLib removed", "Smart Farm now renders its own menu directly; no external UI library is loaded.", "NEW" },
         { "📊", "Dedicated Stats page", "Traits, stat rolls, Roll Preview and roll history are grouped together so they are easy to find.", "NEW" },
@@ -4851,51 +4857,74 @@ function GUI.load()
         screen.Name = "CKD_LiquidGlass"; screen.ResetOnSpawn = false; screen.DisplayOrder = 100000
         screen.ZIndexBehavior = Enum.ZIndexBehavior.Sibling; screen.Parent = pg
 
+        local baseW, baseH = cfg.width or 1020, cfg.height or 620
+        local camera = workspace.CurrentCamera
+        local viewport = camera and camera.ViewportSize or Vector2.new(1280, 720)
+
+        local function fitScale()
+            local fitX = math.max(0.50, (viewport.X - 24) / baseW)
+            local fitY = math.max(0.50, (viewport.Y - 24) / baseH)
+            local requested = math.clamp(tonumber(CFG.uiScale) or 1, 0.80, 1.20)
+            return math.min(requested, fitX, fitY, 1.20)
+        end
+
         local main = glass(screen, C.bg, 0.08, 20)
-        main.Size = UDim2.fromOffset(cfg.width or 1040, cfg.height or 680)
-        main.AnchorPoint = Vector2.new(0.5,0.5); main.Position = UDim2.fromScale(0.5,0.5); main.ClipsDescendants = true
-        local scl = Instance.new("UIScale"); scl.Scale = math.clamp(tonumber(CFG.uiScale) or 1, 0.8, 1.2); scl.Parent = main
+        main.Size = UDim2.fromOffset(baseW, baseH)
+        main.AnchorPoint = Vector2.new(0.5,0.5)
+        main.Position = UDim2.fromOffset(math.floor(viewport.X / 2), math.floor(viewport.Y / 2))
+        main.ClipsDescendants = true
+        main.Active = true
+
+        local scl = Instance.new("UIScale")
+        scl.Scale = fitScale()
+        scl.Parent = main
         GUI.uiScaleObject = scl
 
+        local function refreshViewport()
+            camera = workspace.CurrentCamera
+            viewport = camera and camera.ViewportSize or viewport
+            scl.Scale = fitScale()
+        end
+
         local top = glass(main, C.panel, 0.12, 0)
-        top.Size = UDim2.new(1,0,0,72)
+        top.Size = UDim2.new(1,0,0,64)
         top.Active = true
         local tc = top:FindFirstChildOfClass("UICorner"); if tc then tc:Destroy() end
 
         local brand = glass(top, C.accentBg, 0.05, 13)
-        brand.Size = UDim2.fromOffset(44,44); brand.Position = UDim2.fromOffset(16,14)
+        brand.Size = UDim2.fromOffset(40,40); brand.Position = UDim2.fromOffset(14,12)
         local bt = label(brand, "SF", 14, C.accent, Enum.Font.GothamBlack); bt.Size = UDim2.fromScale(1,1); bt.TextXAlignment = Enum.TextXAlignment.Center
 
         local ttl = label(top, cfg.title or "CKD Smart Farm", 18, C.text, Enum.Font.GothamBlack)
-        ttl.Position = UDim2.fromOffset(72,12); ttl.Size = UDim2.new(1,-300,0,24)
+        ttl.Position = UDim2.fromOffset(66,9); ttl.Size = UDim2.new(1,-290,0,22)
         local sub = label(top, cfg.subtitle or ("Liquid Glass · v"..VERSION), 9, C.sub, Enum.Font.GothamMedium)
-        sub.Position = UDim2.fromOffset(73,38); sub.Size = UDim2.new(1,-300,0,18)
+        sub.Position = UDim2.fromOffset(67,32); sub.Size = UDim2.new(1,-290,0,16)
 
-        local place = glass(top, C.accentBg, 0.05, 999); place.Size = UDim2.fromOffset(112,30); place.Position = UDim2.new(1,-166,0,21)
+        local place = glass(top, C.accentBg, 0.05, 999); place.Size = UDim2.fromOffset(108,28); place.Position = UDim2.new(1,-162,0,18)
         local placeTxt = label(place, "●  LOBBY", 10, C.accent, Enum.Font.GothamBold); placeTxt.Size = UDim2.fromScale(1,1); placeTxt.TextXAlignment = Enum.TextXAlignment.Center
 
-        local mini = Instance.new("TextButton"); mini.Size = UDim2.fromOffset(32,32); mini.Position = UDim2.new(1,-45,0,20)
+        local mini = Instance.new("TextButton"); mini.Size = UDim2.fromOffset(30,30); mini.Position = UDim2.new(1,-43,0,17)
         mini.BackgroundColor3 = C.card; mini.BackgroundTransparency = 0.12; mini.BorderSizePixel = 0; mini.Text = "—"
         mini.TextColor3 = C.text; mini.Font = Enum.Font.GothamBold; mini.TextSize = 15; mini.AutoButtonColor = false; mini.Parent = top
         corner(mini,10); stroke(mini)
 
-        local side = glass(main, C.panel, 0.16, 0); side.Position = UDim2.fromOffset(0,72); side.Size = UDim2.new(0,190,1,-100)
+        local side = glass(main, C.panel, 0.16, 0); side.Position = UDim2.fromOffset(0,64); side.Size = UDim2.new(0,184,1,-90)
         local cc = side:FindFirstChildOfClass("UICorner"); if cc then cc:Destroy() end
-        local nt = label(side, "NAVIGATION", 9, C.sub, Enum.Font.GothamBold); nt.Position = UDim2.fromOffset(14,10); nt.Size = UDim2.new(1,-28,0,20)
+        local nt = label(side, "NAVIGATION", 8, C.sub, Enum.Font.GothamBold); nt.Position = UDim2.fromOffset(13,8); nt.Size = UDim2.new(1,-26,0,18)
 
         local nav = Instance.new("ScrollingFrame")
-        nav.BackgroundTransparency = 1; nav.BorderSizePixel = 0; nav.Position = UDim2.fromOffset(10,38); nav.Size = UDim2.new(1,-20,1,-48)
+        nav.BackgroundTransparency = 1; nav.BorderSizePixel = 0; nav.Position = UDim2.fromOffset(9,32); nav.Size = UDim2.new(1,-18,1,-38)
         nav.AutomaticCanvasSize = Enum.AutomaticSize.Y; nav.CanvasSize = UDim2.new(); nav.ScrollBarThickness = 0; nav.Parent = side
-        local nl = Instance.new("UIListLayout"); nl.Padding = UDim.new(0,6); nl.SortOrder = Enum.SortOrder.LayoutOrder; nl.Parent = nav
+        local nl = Instance.new("UIListLayout"); nl.Padding = UDim.new(0,5); nl.SortOrder = Enum.SortOrder.LayoutOrder; nl.Parent = nav
 
-        local head = glass(main, C.card, 0.16, 14); head.Position = UDim2.fromOffset(204,84); head.Size = UDim2.new(1,-218,0,58)
-        local pageTitle = label(head, "Home", 16, C.text, Enum.Font.GothamBlack); pageTitle.Position = UDim2.fromOffset(16,7); pageTitle.Size = UDim2.new(1,-32,0,22)
-        local pageSub = label(head, "Overview and current resources", 9, C.sub, Enum.Font.GothamMedium); pageSub.Position = UDim2.fromOffset(16,31); pageSub.Size = UDim2.new(1,-32,0,17)
+        local head = glass(main, C.card, 0.16, 14); head.Position = UDim2.fromOffset(198,74); head.Size = UDim2.new(1,-210,0,52); head.Active = true
+        local pageTitle = label(head, "Home", 16, C.text, Enum.Font.GothamBlack); pageTitle.Position = UDim2.fromOffset(15,5); pageTitle.Size = UDim2.new(1,-30,0,21)
+        local pageSub = label(head, "Overview and current resources", 9, C.sub, Enum.Font.GothamMedium); pageSub.Position = UDim2.fromOffset(15,27); pageSub.Size = UDim2.new(1,-30,0,15)
 
-        local content = Instance.new("Frame"); content.BackgroundTransparency = 1; content.Position = UDim2.fromOffset(204,152)
-        content.Size = UDim2.new(1,-218,1,-190); content.ClipsDescendants = true; content.Parent = main
+        local content = Instance.new("Frame"); content.BackgroundTransparency = 1; content.Position = UDim2.fromOffset(198,134)
+        content.Size = UDim2.new(1,-210,1,-168); content.ClipsDescendants = true; content.Parent = main
 
-        local status = glass(main, C.panel, 0.12, 0); status.Position = UDim2.new(0,0,1,-28); status.Size = UDim2.new(1,0,0,28)
+        local status = glass(main, C.panel, 0.12, 0); status.Position = UDim2.new(0,0,1,-26); status.Size = UDim2.new(1,0,0,26)
         local stc = status:FindFirstChildOfClass("UICorner"); if stc then stc:Destroy() end
         local dot = Instance.new("Frame"); dot.Size = UDim2.fromOffset(7,7); dot.Position = UDim2.fromOffset(14,10); dot.BackgroundColor3 = C.green; dot.BorderSizePixel = 0; dot.Parent = status; corner(dot,999)
         local st = label(status, "Ready", 9, C.sub, Enum.Font.GothamMedium); st.Position = UDim2.fromOffset(29,4); st.Size = UDim2.new(1,-42,0,20)
@@ -4924,11 +4953,11 @@ function GUI.load()
         function Win:Tab(iconText, name)
             if name == nil then name, iconText = tostring(iconText), "" end
             name, iconText = tostring(name), tostring(iconText or "")
-            local b = glass(nav, C.card, 0.28, 10); b.Size = UDim2.new(1,0,0,42); b.LayoutOrder = NAV_ORDER[name] or 99
+            local b = glass(nav, C.card, 0.28, 10); b.Size = UDim2.new(1,0,0,38); b.LayoutOrder = NAV_ORDER[name] or 99
             local click = Instance.new("TextButton"); click.BackgroundTransparency = 1; click.Text = ""; click.Size = UDim2.fromScale(1,1); click.Parent = b
-            local bar = Instance.new("Frame"); bar.Size = UDim2.fromOffset(3,24); bar.Position = UDim2.fromOffset(3,9); bar.BackgroundColor3 = C.accent; bar.BorderSizePixel = 0; bar.Visible = false; bar.Parent = b; corner(bar,999)
-            local il = label(b, iconText, 14, C.sub, Enum.Font.GothamMedium); il.Position = UDim2.fromOffset(13,0); il.Size = UDim2.fromOffset(26,42); il.TextXAlignment = Enum.TextXAlignment.Center
-            local nm = label(b, name, 11, C.sub, Enum.Font.GothamBold); nm.Position = UDim2.fromOffset(45,0); nm.Size = UDim2.new(1,-54,1,0)
+            local bar = Instance.new("Frame"); bar.Size = UDim2.fromOffset(3,22); bar.Position = UDim2.fromOffset(3,8); bar.BackgroundColor3 = C.accent; bar.BorderSizePixel = 0; bar.Visible = false; bar.Parent = b; corner(bar,999)
+            local il = label(b, iconText, 14, C.sub, Enum.Font.GothamMedium); il.Position = UDim2.fromOffset(12,0); il.Size = UDim2.fromOffset(25,38); il.TextXAlignment = Enum.TextXAlignment.Center
+            local nm = label(b, name, 11, C.sub, Enum.Font.GothamBold); nm.Position = UDim2.fromOffset(42,0); nm.Size = UDim2.new(1,-50,1,0)
 
             local page = Instance.new("ScrollingFrame"); page.BackgroundTransparency = 1; page.BorderSizePixel = 0; page.Size = UDim2.fromScale(1,1)
             page.AutomaticCanvasSize = Enum.AutomaticSize.Y; page.CanvasSize = UDim2.new(); page.ScrollBarThickness = 3; page.ScrollBarImageColor3 = C.accent; page.Visible = false; page.Parent = content
@@ -5053,11 +5082,84 @@ function GUI.load()
         function Win:SelectTab(n) select(n); return Win._tabs[n]~=nil end; function Win:IsDestroyed() return not screen.Parent end
         function Win:Destroy() for _,cn in ipairs(Win._conns) do pcall(function() cn:Disconnect() end) end; if screen.Parent then screen:Destroy() end end
 
-        local dragging,dragStart,startPos
-        Win._track(top.InputBegan:Connect(function(i) if i.UserInputType==Enum.UserInputType.MouseButton1 or i.UserInputType==Enum.UserInputType.Touch then dragging=true; dragStart=i.Position; startPos=main.Position end end))
-        Win._track(UIS.InputChanged:Connect(function(i) if dragging and (i.UserInputType==Enum.UserInputType.MouseMovement or i.UserInputType==Enum.UserInputType.Touch) then local d=i.Position-dragStart; main.Position=UDim2.new(startPos.X.Scale,startPos.X.Offset+d.X,startPos.Y.Scale,startPos.Y.Offset+d.Y) end end))
-        Win._track(UIS.InputEnded:Connect(function(i) if i.UserInputType==Enum.UserInputType.MouseButton1 or i.UserInputType==Enum.UserInputType.Touch then dragging=false end end))
-        Win._track(mini.Activated:Connect(function() local open=content.Visible; content.Visible=not open; side.Visible=not open; head.Visible=not open; status.Visible=not open; main.Size=open and UDim2.fromOffset(cfg.width or 1040,72) or UDim2.fromOffset(cfg.width or 1040,cfg.height or 680); mini.Text=open and "+" or "—" end))
+        local dragging, dragStart, startCenter
+
+        local function renderedSize()
+            return Vector2.new(baseW * scl.Scale, baseH * scl.Scale)
+        end
+
+        local function clampCenter(pos)
+            refreshViewport()
+            local rs = renderedSize()
+            local halfW, halfH = rs.X / 2, rs.Y / 2
+            local margin = 8
+            local minX = math.min(viewport.X / 2, halfW + margin)
+            local maxX = math.max(viewport.X / 2, viewport.X - halfW - margin)
+            local minY = math.min(viewport.Y / 2, halfH + margin)
+            local maxY = math.max(viewport.Y / 2, viewport.Y - halfH - margin)
+            return Vector2.new(
+                math.clamp(pos.X, minX, maxX),
+                math.clamp(pos.Y, minY, maxY)
+            )
+        end
+
+        local function setCenter(pos)
+            local p = clampCenter(pos)
+            main.Position = UDim2.fromOffset(math.floor(p.X), math.floor(p.Y))
+        end
+
+        local function beginDrag(i)
+            if i.UserInputType ~= Enum.UserInputType.MouseButton1 and i.UserInputType ~= Enum.UserInputType.Touch then return end
+            dragging = true
+            dragStart = i.Position
+            startCenter = Vector2.new(main.AbsolutePosition.X + main.AbsoluteSize.X / 2, main.AbsolutePosition.Y + main.AbsoluteSize.Y / 2)
+        end
+
+        -- Make both the title area and the page header reliable drag handles.
+        for _, dragSurface in ipairs({ top, brand, ttl, sub, head, pageTitle, pageSub }) do
+            dragSurface.Active = true
+            Win._track(dragSurface.InputBegan:Connect(beginDrag))
+        end
+
+        Win._track(UIS.InputChanged:Connect(function(i)
+            if dragging and (i.UserInputType == Enum.UserInputType.MouseMovement or i.UserInputType == Enum.UserInputType.Touch) then
+                local d = i.Position - dragStart
+                setCenter(startCenter + Vector2.new(d.X, d.Y))
+            end
+        end))
+        Win._track(UIS.InputEnded:Connect(function(i)
+            if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then dragging = false end
+        end))
+
+        local fullSize = UDim2.fromOffset(baseW, baseH)
+        local miniSize = UDim2.fromOffset(baseW, 64)
+        Win._track(mini.Activated:Connect(function()
+            local open = content.Visible
+            content.Visible = not open
+            side.Visible = not open
+            head.Visible = not open
+            status.Visible = not open
+            main.Size = open and miniSize or fullSize
+            mini.Text = open and "+" or "—"
+            task.defer(function()
+                local pos = Vector2.new(main.AbsolutePosition.X + main.AbsoluteSize.X / 2, main.AbsolutePosition.Y + main.AbsoluteSize.Y / 2)
+                setCenter(pos)
+            end)
+        end))
+
+        if camera then
+            Win._track(camera:GetPropertyChangedSignal("ViewportSize"):Connect(function()
+                refreshViewport()
+                setCenter(Vector2.new(main.AbsolutePosition.X + main.AbsoluteSize.X / 2, main.AbsolutePosition.Y + main.AbsoluteSize.Y / 2))
+            end))
+        end
+
+        -- Guarantee the first frame starts fully inside the Roblox viewport.
+        task.defer(function()
+            refreshViewport()
+            setCenter(Vector2.new(viewport.X / 2, viewport.Y / 2))
+        end)
+
         task.spawn(function() while SF.alive and screen.Parent do local m=SF.where=="match"; placeTxt.Text=m and "●  MATCH" or "●  LOBBY"; placeTxt.TextColor3=m and C.green or C.accent; task.wait(0.5) end end)
 
         return Win
@@ -5070,8 +5172,8 @@ function GUI.build()
     local Win = Lib:Window({
         title = title,
         subtitle = "Native Liquid Glass Control Center  •  v" .. VERSION,
-        width = 1040,
-        height = 680,
+        width = 1020,
+        height = 620,
     })
     GUI.Win = Win
     local UI, LIVE = GUI.UI, GUI.LIVE
@@ -5381,10 +5483,15 @@ function GUI.build()
     }, function(v)
         setCfg("uiScale", v)
         if GUI.uiScaleObject and GUI.uiScaleObject.Parent then
-            pcall(function() GUI.uiScaleObject.Scale = v end)
+            pcall(function()
+                local cam = workspace.CurrentCamera
+                local vp = cam and cam.ViewportSize or Vector2.new(1280, 720)
+                local fit = math.min((vp.X - 24) / 1020, (vp.Y - 24) / 620, 1.20)
+                GUI.uiScaleObject.Scale = math.min(v, fit)
+            end)
         end
     end)
-    T:Paragraph("Smart Farm now uses its own native Liquid Glass menu. NexusLib, old themes, glow switches and UI animations are removed.")
+    T:Paragraph("Native Liquid Glass automatically fits inside your Roblox window. Drag from the top bar or page header; the menu is clamped so it cannot be lost off-screen.")
 
     T:Section("GENERAL")
     tog(T, "Anti-AFK", "Send an input when Roblox flags you idle", "antiAfk")
