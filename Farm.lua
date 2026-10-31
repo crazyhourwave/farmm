@@ -1,5 +1,5 @@
 --[[
-    🍬 Candy Kingdom Defense — Smart Farm v1.8.3  (NexusLib)
+    🍬 Candy Kingdom Defense — Smart Farm v1.8.4  (NexusLib)
 
     One script for both places of the game:
       • Lobby (Tree Fort):  rewards → feed → traits/stats → summon → pick the best mode → launch
@@ -13,10 +13,15 @@
 
 -- claim the "running" slot synchronously, before any yield, so two queued loaders can't both start
 if _G.CKD_SF and _G.CKD_SF.alive then return end
-local VERSION = "1.8.3"
+local VERSION = "1.8.4"
 -- what changed, newest first (Updates tab; a one-time notice when a player first runs a new version)
 -- items: { icon, title, text, tag = NEW | IMPROVED | FIX }
 local CHANGELOG = {
+    { v = "1.8.4", date = "Oct 31, 2026", title = "Manual Infinite Picker", items = {
+        { "♾️", "Infinite added to Act picker", "World / Act now includes Infinite after the normal story acts.", "NEW" },
+        { "🗺️", "World-specific Infinite", "The selected world launches its own Infinite stage when that mode is unlocked.", "NEW" },
+        { "🔁", "Infinite loop support", "When a manual Infinite run ends, Smart Farm returns to the lobby and launches the same world Infinite again.", "NEW" },
+    } },
     { v = "1.8.3", date = "Oct 31, 2026", title = "Manual Team Control", items = {
         { "🧍", "Auto Best Team removed", "Smart Farm no longer changes your equipped team automatically.", "FIX" },
         { "🎛️", "Toggle removed", "Removed the Auto Best Team option from the Lobby menu.", "FIX" },
@@ -936,19 +941,49 @@ function C.MODE.normalWorlds()
     return out
 end
 
+function C.MODE.normalMaxActs()
+    local maxActs = 1
+    for _, W in ipairs(C.MODE.normalWorlds()) do
+        maxActs = math.max(maxActs, #W.stages)
+    end
+    return maxActs
+end
+
 function C.MODE.selectedNormal(prof)
     local worlds = C.MODE.normalWorlds()
     if #worlds == 0 then return nil, "no normal worlds found" end
 
     local wi = math.clamp(math.floor(tonumber(CFG.normalWorld) or 1), 1, #worlds)
     local W = worlds[wi]
-    local ai = math.clamp(math.floor(tonumber(CFG.normalAct) or 1), 1, #W.stages)
-    local st = W.stages[ai]
+    local maxActs = C.MODE.normalMaxActs()
+    local infiniteIndex = maxActs + 1
+    local ai = math.clamp(math.floor(tonumber(CFG.normalAct) or 1), 1, infiniteIndex)
+    local wantsInfinite = ai == infiniteIndex
 
     -- Keep the stored values sane when the game adds/removes maps.
     CFG.normalWorld, CFG.normalAct = wi, ai
 
-    if not st then return nil, "selected act does not exist" end
+    if wantsInfinite then
+        local worldId = W.world and W.world.id
+        local okI, open = pcall(C.Catalog.infiniteOpen, prof, worldId)
+        local inf = okI and open and C.Catalog.infiniteStage(worldId) or nil
+        if not inf then
+            return nil, string.format("%s · Infinite is locked", W.name)
+        end
+        return {
+            stage = inf.id,
+            infinite = true,
+            world = worldId,
+            first = false,
+            kind = "manual",
+            manual = true,
+            manualWorld = wi,
+            manualAct = ai,
+        }, string.format("%s · ♾️ Infinite · %s", W.name, tostring(inf.name or ("Stage " .. tostring(inf.id))))
+    end
+
+    local st = W.stages[ai]
+    if not st then return nil, string.format("%s · Act %d does not exist", W.name, ai) end
     if prof and C.Catalog.unlocked and not C.Catalog.unlocked(prof, st.id) then
         return nil, string.format("%s · Act %d is locked", W.name, ai)
     end
@@ -3970,8 +4005,14 @@ function MT.finish()
     -- Dungeon Train challenges are relaunched through the hub every time. Act("again") can return ok while
     -- losing the challenge id, which turns the next run into a normal stage. Returning to the Train is a
     -- little slower but preserves the exact challenge id and lets challengesAt(os.time()) see refreshed cars.
-    if CFG.normalLoop and pick and pick.manual and not MT.infinite and not MT.raid and not MT.tourney and not MT.portal then
-        if tonumber(pick.stage) == tonumber(MT.stage) and not mode.challenge then
+    if CFG.normalLoop and pick and pick.manual and not MT.raid and not MT.tourney and not MT.portal then
+        if pick.infinite then
+            action = "home"
+            why = "Selected Stage Loop · relaunching the chosen world Infinite"
+        elseif MT.infinite then
+            action = "home"
+            why = "Selected Stage Loop · switching from Infinite to the chosen normal act"
+        elseif tonumber(pick.stage) == tonumber(MT.stage) and not mode.challenge then
             action = "again"
             why = "Selected Stage Loop · replaying the same normal act"
         else
@@ -4817,20 +4858,21 @@ function GUI.build()
 
     local actNames = {}
     for i = 1, maxActs do actNames[i] = "Act " .. tostring(i) end
+    actNames[maxActs + 1] = "♾️ Infinite"
 
     CFG.normalWorld = math.clamp(math.floor(tonumber(CFG.normalWorld) or 1), 1, #normalWorldNames)
-    CFG.normalAct = math.clamp(math.floor(tonumber(CFG.normalAct) or 1), 1, maxActs)
+    CFG.normalAct = math.clamp(math.floor(tonumber(CFG.normalAct) or 1), 1, maxActs + 1)
 
-    UI.normalWorld = T:Dropdown("World", "Pick the normal world to replay", normalWorldNames, CFG.normalWorld, function(_, _, i)
+    UI.normalWorld = T:Dropdown("World", "Pick the world to replay", normalWorldNames, CFG.normalWorld, function(_, _, i)
         setCfg("normalWorld", tonumber(i) or 1)
         CFG.normalAct = 1
         pcall(function() UI.normalAct.Set(1, true) end)
     end)
-    UI.normalAct = T:Dropdown("Act", "Pick the act inside that world", actNames, CFG.normalAct, function(_, _, i)
+    UI.normalAct = T:Dropdown("Act", "Pick Act 1-" .. tostring(maxActs) .. " or Infinite", actNames, CFG.normalAct, function(_, _, i)
         setCfg("normalAct", tonumber(i) or 1)
     end)
-    tog(T, "Selected Stage Loop", "Force this World + Act and replay it nonstop", "normalLoop")
-    T:Button("▶", "Start Selected Stage Loop", "Use the World + Act above and keep replaying that normal stage", function()
+    tog(T, "Selected Stage Loop", "Force this World + Act / Infinite and replay it nonstop", "normalLoop")
+    T:Button("▶", "Start Selected Stage Loop", "Use the World + Act / Infinite above and keep replaying it", function()
         CFG.play = true
         CFG.normalLoop = true
         pcall(function() UI.play.Set(true, true) end)
