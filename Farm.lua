@@ -1,5 +1,5 @@
 --[[
-    🍬 Candy Kingdom Defense — Smart Farm v1.9.1  (NexusLib)
+    🍬 Candy Kingdom Defense — Smart Farm v1.9.2  (NexusLib)
 
     One script for both places of the game:
       • Lobby (Tree Fort):  rewards → feed → traits/stats → summon → pick the best mode → launch
@@ -13,10 +13,15 @@
 
 -- claim the "running" slot synchronously, before any yield, so two queued loaders can't both start
 if _G.CKD_SF and _G.CKD_SF.alive then return end
-local VERSION = "1.9.1"
+local VERSION = "1.9.2"
 -- what changed, newest first (Updates tab; a one-time notice when a player first runs a new version)
 -- items: { icon, title, text, tag = NEW | IMPROVED | FIX }
 local CHANGELOG = {
+    { v = "1.9.2", date = "Oct 31, 2026", title = "Live Resource Totals", items = {
+        { "💎", "Resources visible in matches", "Home now shows your current Gems, Candy, Big Candy, Halloween Candy, Bug Milk and Trait Crystals.", "NEW" },
+        { "📈", "Rewards update without lobby", "Match rewards are reflected in the totals as soon as the result event is banked into the cached profile.", "NEW" },
+        { "🥛", "Bug Milk counter", "Raid Keys are labeled as Bug Milk so the number matches what you recognize in-game.", "IMPROVED" },
+    } },
     { v = "1.9.1", date = "Oct 31, 2026", title = "Always-On Auto Skip", items = {
         { "⚡", "One skip engine for every mode", "Normal stages and Infinite now use the same direct, fast Skip Wave request path.", "FIX" },
         { "🔁", "Fast retry worker", "A dedicated worker retries roughly every 0.12s until the server accepts the next-wave request.", "NEW" },
@@ -5222,6 +5227,14 @@ function GUI.build()
     UI.master = T:Toggle("Smart Farm", "Master switch for every system (lobby + match)", CFG.master, function(on)
         setCfg("master", on); Win:Status(on and "▶ Farming" or "⏸ Paused")
     end)
+
+    T:Section("TOTAL RESOURCES")
+    if T.StatGrid then
+        GUI.resourceTiles = T:StatGrid({ "Gems", "Candy", "Big Candy", "Halloween Candy", "Bug Milk", "Trait Crystals" }, 3)
+    else
+        LIVE.resources = T:Paragraph("Loading current resources…")
+    end
+
     GUI.SYSTEMS = { "Mode", "Battle", "Economy", "Placement", "Upgrade", "Abilities", "Match", "Evolve", "Banner", "Summon", "Team", "Feed", "Traits", "Stats", "Tourney", "Cleanup", "Rewards" }
     if T.StatusCard and T.StatGrid and T.KeyValue then
         -- NexusLib 1.7+: what it's doing and why, goals at a glance, then every system in one compact list
@@ -5611,6 +5624,32 @@ function GUI.updateTabs()
     local COL = GUI.COL or {}
     local p = B.prof or {}
     local items = p.items or {}
+
+    -- Live totals work in both Lobby and Match. B.prof is refreshed in the lobby and match results
+    -- are banked into the same cached profile, so the player does not need to teleport home to check.
+    local gems = tonumber(p.gems) or 0
+    local candy = tonumber(items.candy) or 0
+    local bigCandy = tonumber(items.bigcandy) or 0
+    local hwCandy = tonumber(items.hwcandy) or 0
+    local bugMilk = tonumber(items.raidkey) or 0
+    local crystals = tonumber(items.crystal) or 0
+    if GUI.resourceTiles then
+        pcall(GUI.resourceTiles.Set, "Gems", U.fmt(gems), SF.where == "match" and "live cached total" or "current balance", COL.gold, nil)
+        pcall(GUI.resourceTiles.Set, "Candy", U.fmt(candy), "XP Candy", COL.orange, nil)
+        pcall(GUI.resourceTiles.Set, "Big Candy", U.fmt(bigCandy), "large XP Candy", COL.purple, nil)
+        pcall(GUI.resourceTiles.Set, "Halloween Candy", U.fmt(hwCandy), "event currency", COL.orange, nil)
+        pcall(GUI.resourceTiles.Set, "Bug Milk", U.fmt(bugMilk), "raid keys", COL.green, nil)
+        pcall(GUI.resourceTiles.Set, "Trait Crystals", U.fmt(crystals), "trait rerolls", COL.purple, nil)
+    elseif LIVE.resources then
+        pcall(LIVE.resources.Set, table.concat({
+            "💎 Gems: " .. U.fmt(gems),
+            "🍬 Candy: " .. U.fmt(candy),
+            "🍭 Big Candy: " .. U.fmt(bigCandy),
+            "🎃 Halloween Candy: " .. U.fmt(hwCandy),
+            "🥛 Bug Milk: " .. U.fmt(bugMilk),
+            "💠 Trait Crystals: " .. U.fmt(crystals),
+        }, "\n"))
+    end
 
     if SF.where == "hub" and U.now() - (RNGP.scannedAt or 0) > 20 then
         pcall(RNGP.scan, false)
