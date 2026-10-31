@@ -1,5 +1,5 @@
 --[[
-    🍬 Candy Kingdom Defense — Smart Farm v2.0.2  (NexusLib)
+    🍬 Candy Kingdom Defense — Smart Farm v2.0.3  (NexusLib)
 
     One script for both places of the game:
       • Lobby (Tree Fort):  rewards → feed → traits/stats → summon → pick the best mode → launch
@@ -13,10 +13,15 @@
 
 -- claim the "running" slot synchronously, before any yield, so two queued loaders can't both start
 if _G.CKD_SF and _G.CKD_SF.alive then return end
-local VERSION = "2.0.2"
+local VERSION = "2.0.3"
 -- what changed, newest first (Updates tab; a one-time notice when a player first runs a new version)
 -- items: { icon, title, text, tag = NEW | IMPROVED | FIX }
 local CHANGELOG = {
+    { v = "2.0.3", date = "Oct 31, 2026", title = "Live Resource Mirror", items = {
+        { "👁️", "Reads match-side resource counters", "Smart Farm now mirrors client-visible Gems, Candy, Big Candy, Halloween Candy, Bug Milk and Trait Crystals during a run.", "NEW" },
+        { "🔎", "Multiple live sources", "Checks player attributes, replicated values and resource UI labels instead of depending only on lobby profile remotes.", "NEW" },
+        { "♾️", "Infinite-friendly", "Resource totals can update during long Infinite runs before the final result event arrives.", "FIX" },
+    } },
     { v = "2.0.2", date = "Oct 31, 2026", title = "Live Match Profile Sync", items = {
         { "🔄", "Resources sync during matches", "Smart Farm now listens for profile updates in the match server too.", "NEW" },
         { "📡", "Periodic exact refresh", "When GetProfile is available in a match, the script refreshes the authoritative profile every few seconds.", "NEW" },
@@ -1451,6 +1456,151 @@ function HUB.matchRefreshProfile()
     if not ok then return false, tostring(res) end
     if HUB.acceptProfilePayload(res, "GetProfile") then return true end
     return false, "no profile payload"
+end
+
+local LIVE_RESOURCE_ALIASES = {
+    gems = { "gems", "gem", "gemcount", "gemsamount", "gemamount" },
+    candy = { "candy", "candies", "xpcandy", "smallcandy" },
+    bigcandy = { "bigcandy", "largecandy", "bigcandies" },
+    hwcandy = { "hwcandy", "halloweencandy", "halloweencandies", "eventcandy" },
+    raidkey = { "raidkey", "raidkeys", "bugmilk", "milk", "bugmilks" },
+    crystal = { "crystal", "crystals", "traitcrystal", "traitcrystals" },
+}
+
+local function liveNorm(v)
+    return tostring(v or ""):lower():gsub("[^%w]", "")
+end
+
+local function liveParseNumber(v)
+    if type(v) == "number" then return v end
+    local s = tostring(v or ""):lower():gsub(",", ""):gsub("%s+", "")
+    local n, suffix = s:match("([%d%.]+)([kmb]?)")
+    n = tonumber(n)
+    if not n then return nil end
+    if suffix == "k" then n = n * 1e3 elseif suffix == "m" then n = n * 1e6 elseif suffix == "b" then n = n * 1e9 end
+    return n
+end
+
+local function aliasKey(name)
+    name = liveNorm(name)
+    for key, aliases in pairs(LIVE_RESOURCE_ALIASES) do
+        for _, a in ipairs(aliases) do
+            if name == a then return key end
+        end
+    end
+    return nil
+end
+
+local function applyLiveResource(key, value, source)
+    value = liveParseNumber(value)
+    if not value or value < 0 then return false end
+    B.prof = type(B.prof) == "table" and B.prof or {}
+    B.prof.items = type(B.prof.items) == "table" and B.prof.items or {}
+    if key == "gems" then
+        B.prof.gems = value
+    else
+        B.prof.items[key] = value
+    end
+    B.liveResourceAt = U.now()
+    B.liveResourceSource = tostring(source or "client")
+    B.liveResourceKeys = B.liveResourceKeys or {}
+    B.liveResourceKeys[key] = B.liveResourceAt
+    return true
+end
+
+local function scanAttributes(inst, source)
+    if not inst then return 0 end
+    local count = 0
+    local ok, attrs = pcall(inst.GetAttributes, inst)
+    if ok and type(attrs) == "table" then
+        for name, value in pairs(attrs) do
+            local key = aliasKey(name)
+            if key and applyLiveResource(key, value, source .. ":attr:" .. tostring(name)) then count += 1 end
+        end
+    end
+    return count
+end
+
+local function scanValueObjects(root, source, limit)
+    if not root then return 0 end
+    local count, seen = 0, 0
+    local ok, descendants = pcall(root.GetDescendants, root)
+    if not ok or type(descendants) ~= "table" then return 0 end
+    for _, inst in ipairs(descendants) do
+        seen += 1
+        if seen > (limit or 2500) then break end
+        if inst:IsA("IntValue") or inst:IsA("NumberValue") or inst:IsA("StringValue") then
+            local key = aliasKey(inst.Name)
+            if key and applyLiveResource(key, inst.Value, source .. ":" .. inst:GetFullName()) then count += 1 end
+        end
+        count += scanAttributes(inst, source)
+    end
+    return count
+end
+
+local function scanResourceUi()
+    local pg = LP:FindFirstChildOfClass("PlayerGui")
+    if not pg then return 0 end
+    local ok, descendants = pcall(pg.GetDescendants, pg)
+    if not ok then return 0 end
+    local count = 0
+    for _, inst in ipairs(descendants) do
+        if inst:IsA("TextLabel") or inst:IsA("TextButton") then
+            local key = aliasKey(inst.Name) or aliasKey(inst.Text)
+            if key then
+                local candidates = {}
+                if inst.Parent then
+                    for _, sib in ipairs(inst.Parent:GetChildren()) do
+                        if sib ~= inst and (sib:IsA("TextLabel") or sib:IsA("TextButton") or sib:IsA("TextBox")) then
+                            table.insert(candidates, sib.Text)
+                        end
+                    end
+                end
+                table.insert(candidates, inst.Text)
+                for _, txt in ipairs(candidates) do
+                    local n = liveParseNumber(txt)
+                    if n and applyLiveResource(key, n, "ui:" .. inst:GetFullName()) then
+                        count += 1
+                        break
+                    end
+                end
+            end
+        end
+    end
+    return count
+end
+
+function HUB.scanLiveResources()
+    if SF.where ~= "match" then return 0 end
+    local found = 0
+
+    -- Highest-confidence sources first.
+    found += scanAttributes(LP, "player")
+    found += scanValueObjects(LP, "player", 800)
+
+    local mr = RS:FindFirstChild("MatchRemotes")
+    if mr then
+        found += scanAttributes(mr, "MatchRemotes")
+        found += scanValueObjects(mr, "MatchRemotes", 800)
+    end
+
+    -- Other replicated folders occasionally hold a replicated currency state.
+    found += scanAttributes(RS, "ReplicatedStorage")
+    for _, child in ipairs(RS:GetChildren()) do
+        local n = liveNorm(child.Name)
+        if n:find("data", 1, true) or n:find("profile", 1, true) or n:find("player", 1, true) or n:find("state", 1, true) then
+            found += scanValueObjects(child, "replicated", 1200)
+        end
+    end
+
+    -- Last resort: read the game's own visible resource labels.
+    found += scanResourceUi()
+
+    if found > 0 then
+        B.liveResourceScanAt = U.now()
+        return found
+    end
+    return 0
 end
 
 -- ============================================================
@@ -4736,6 +4886,21 @@ function MT.run()
         end
     end)
 
+    -- Mirror whatever resource counters the match client itself has.
+    task.spawn(function()
+        local lastFound = -1
+        while SF.alive and SF.where == "match" and not MT.over do
+            local okScan, found = pcall(HUB.scanLiveResources)
+            if okScan and found and found > 0 then
+                if found ~= lastFound then
+                    SF.log(2, "PROFILE", "live resource mirror found " .. tostring(found) .. " client-side counters")
+                    lastFound = found
+                end
+            end
+            task.wait(0.75)
+        end
+    end)
+
     task.delay(15, function()
         local ok, err = pcall(MT.raidCheck)
         if not ok then
@@ -5660,8 +5825,9 @@ function GUI.updateTabs()
     local crystals = tonumber(items.crystal) or 0
     if GUI.resourceTiles then
         local exactMatchSync = SF.where == "match" and B.matchProfileSyncAt and (U.now() - B.matchProfileSyncAt) < 10
+        local mirrored = SF.where == "match" and B.liveResourceAt and (U.now() - B.liveResourceAt) < 3
         local gemDesc = SF.where == "match"
-            and (exactMatchSync and "server-synced live" or "reward-tracked live")
+            and (exactMatchSync and "server-synced live" or mirrored and "client-mirrored live" or "reward-tracked live")
             or "current balance"
         pcall(GUI.resourceTiles.Set, "Gems", U.fmt(gems), gemDesc, COL.gold, nil)
         pcall(GUI.resourceTiles.Set, "Candy", U.fmt(candy), "XP Candy", COL.orange, nil)
