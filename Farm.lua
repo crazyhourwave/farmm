@@ -4859,6 +4859,7 @@ function GUI.load()
 
         local top = glass(main, C.panel, 0.12, 0)
         top.Size = UDim2.new(1,0,0,72)
+        top.Active = true
         local tc = top:FindFirstChildOfClass("UICorner"); if tc then tc:Destroy() end
 
         local brand = glass(top, C.accentBg, 0.05, 13)
@@ -4919,10 +4920,11 @@ function GUI.load()
             end
         end
 
+        local NAV_ORDER = { Home=1, Farm=2, Units=3, Stats=4, Battle=5, Logs=6, Updates=7, Settings=8 }
         function Win:Tab(iconText, name)
             if name == nil then name, iconText = tostring(iconText), "" end
             name, iconText = tostring(name), tostring(iconText or "")
-            local b = glass(nav, C.card, 0.28, 10); b.Size = UDim2.new(1,0,0,42)
+            local b = glass(nav, C.card, 0.28, 10); b.Size = UDim2.new(1,0,0,42); b.LayoutOrder = NAV_ORDER[name] or 99
             local click = Instance.new("TextButton"); click.BackgroundTransparency = 1; click.Text = ""; click.Size = UDim2.fromScale(1,1); click.Parent = b
             local bar = Instance.new("Frame"); bar.Size = UDim2.fromOffset(3,24); bar.Position = UDim2.fromOffset(3,9); bar.BackgroundColor3 = C.accent; bar.BorderSizePixel = 0; bar.Visible = false; bar.Parent = b; corner(bar,999)
             local il = label(b, iconText, 14, C.sub, Enum.Font.GothamMedium); il.Position = UDim2.fromOffset(13,0); il.Size = UDim2.fromOffset(26,42); il.TextXAlignment = Enum.TextXAlignment.Center
