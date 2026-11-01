@@ -1,5 +1,5 @@
 --[[
-    🍬 Candy Kingdom Defense — Smart Farm v2.3.5  (NexusLib)
+    🍬 Candy Kingdom Defense — Smart Farm v2.3.6  (NexusLib)
 
     One script for both places of the game:
       • Lobby (Tree Fort):  rewards → feed → traits/stats → summon → pick the best mode → launch
@@ -12,7 +12,7 @@
 ]]
 
 -- Claim the running slot synchronously. A newer build replaces an older live copy instead of silently returning.
-local VERSION = "2.3.5"
+local VERSION = "2.3.6"
 do
     local old = _G.CKD_SF
     if old and old.alive then
@@ -30,6 +30,12 @@ end
 -- what changed, newest first (Updates tab; a one-time notice when a player first runs a new version)
 -- items: { icon, title, text, tag = NEW | IMPROVED | FIX }
 local CHANGELOG = {
+    { v = "2.3.6", date = "Nov 1, 2026", title = "Replay / NEXT Automation Rearm", items = {
+        { "🔁", "Workers survive round endings", "Auto Start, Speed Clear, Auto-Skip and placement workers now stay alive for the entire match server instead of dying after the first win.", "FIX" },
+        { "▶️", "Wait for the new round", "After NEXT/replay, Smart Farm polls Sync until CKD actually reports the new round before resuming automation.", "FIX" },
+        { "🧍", "Placement re-arms", "Team/map state is refreshed after the new round appears so units start placing again automatically.", "FIX" },
+        { "⏱️", "3-minute watchdog resets", "The stuck-match timer restarts on every new round instead of inheriting time from the previous result screen.", "FIX" },
+    } },
     { v = "2.3.5", date = "Nov 1, 2026", title = "Locked Dungeon Train Handoff", items = {
         { "🔒", "FIRST WIN job survives lobby teleport", "Once a refreshed Train is chosen, Normal Grind is blocked until the queued FIRST WIN work launches or is confirmed complete.", "FIX" },
         { "🚂", "Lobby cannot forget the Train", "The exact refreshed challenge IDs are saved before returning to lobby and restored after teleport/reload.", "FIX" },
@@ -4660,6 +4666,54 @@ function MT.resetRun()
     MT.updateReachCut()
     table.clear(MT.cov)
 end
+
+function MT.automationReady()
+    return SF.alive and SF.where == "match" and not MT.over and not MT.roundTransition
+end
+
+function MT.waitForFreshRound(timeout)
+    timeout = tonumber(timeout) or 10
+    MT.roundTransition = true
+    local deadline = U.now() + timeout
+    local fresh = false
+
+    while SF.alive and SF.where == "match" and U.now() < deadline do
+        pcall(MT.resync)
+        if not MT.over then
+            fresh = true
+            break
+        end
+        task.wait(0.25)
+    end
+
+    if fresh then
+        -- Refresh the authoritative match/team info after NEXT/replay. This also repairs stale empty slot data.
+        pcall(MT.loadInfo)
+        if MT.info and MT.info.stage then MT.stage = MT.info.stage end
+        if B.pending and B.pending.challenge and tonumber(B.pending.stage) == tonumber(MT.stage) then
+            MT.challenge = B.pending.challenge
+            local okC, ch = pcall(C.Catalog.challenge, MT.challenge)
+            MT.mods = okC and ch and C.Catalog.challengeMods(ch) or nil
+        elseif B.pending and not B.pending.challenge then
+            MT.challenge, MT.mods = nil, nil
+        end
+
+        table.clear(MT.cov)
+        pcall(MT.initMap)
+        MT.runStart = os.time()
+        MT.joinedMidRun = false
+        MT.progressAt, MT.progressKey = U.now(), ""
+        MT.lastFirstWaveStartAt = 0
+        SF.req.back["Act:start"] = nil
+        SF.log(1, "BATTLE", "new round confirmed · automation re-armed")
+    else
+        SF.log(0, "BATTLE", "NEXT/replay accepted but new round was not visible after " .. tostring(timeout) .. "s")
+        MT.progressAt, MT.progressKey = U.now(), ""
+    end
+
+    MT.roundTransition = false
+    return fresh
+end
 -- a lobby trip costs ~25s (two teleports) against ~270s per map, so only go when it buys enough strength.
 -- When the next map looks shaky (a wall), strength is what's missing, so any gain is worth a trip.
 function MT.hubDue(pick)
@@ -5155,16 +5209,19 @@ function MT.finish()
                 at = os.time(),
             }
             SF.saveNow()
-            MT.runStart = os.time()
-            MT.joinedMidRun = false
-            SF.req.back["Act:start"] = nil
-            MT.over = false; MT.won = nil; MT.result = nil
+            MT.roundTransition = true
+            MT.won, MT.result = nil, nil
             table.clear(MT.dmg); MT.dmgDelta = {}; table.clear(MT.abilityAt)
             MT.resetRun()
-            task.wait(2)
-            MT.resync()
-            if action == "next" then table.clear(MT.cov); MT.initMap() end
+
+            -- Do not assume the new round exists exactly 2 seconds later. Wait until Sync says over=false.
+            local fresh = MT.waitForFreshRound(12)
             MT.finishing = false
+            if fresh then
+                SF.status("Mode", action .. " accepted · new round active")
+            else
+                SF.status("Mode", action .. " accepted · waiting for server round reset")
+            end
             return
         end
         SF.log(1, "MODE", action .. " refused (" .. tostring(err) .. ") → home")
@@ -5670,14 +5727,15 @@ function MT.run()
         MT.planStrat = MT.planKey and plan.strat or nil
     end
     MT.initMap()
+    MT.roundTransition = false
     MT.resetRun()
 
     -- Half-hour Dungeon Train watcher. Finite matches finish normally; Infinite may be interrupted
     -- when fresh FIRST WIN cars appear so a long endless run cannot hide an entire refresh cycle.
     task.spawn(function()
         pcall(C.MODE.challengeClockCheck, B.prof, true, "match start")
-        while SF.alive and SF.where == "match" and not MT.over do
-            if CFG.challenges and CFG.challengeFirstPriority then
+        while SF.alive and SF.where == "match" do
+            if MT.automationReady() and CFG.challenges and CFG.challengeFirstPriority then
                 local okClock, firsts = pcall(C.MODE.challengeClockCheck, B.prof, false, "match clock")
                 local dueNow = B.challengeRefreshDue == true
                     and tonumber(B.challengeDueBucket) == C.MODE.challengeClockBucket(os.time())
@@ -5697,8 +5755,8 @@ function MT.run()
 
     -- Auto Start watchdog is standalone from Battle AI / Speed Clear. This prevents START WAVE 1 deadlocks.
     task.spawn(function()
-        while SF.alive and SF.where == "match" and not MT.over do
-            if CFG.autoStart and not MT.firstWaveStarted() then
+        while SF.alive and SF.where == "match" do
+            if MT.automationReady() and CFG.autoStart and not MT.firstWaveStarted() then
                 pcall(MT.tryStartFirstWave, U.now(), "standalone first-wave watchdog")
             end
             task.wait(0.20)
@@ -5707,8 +5765,8 @@ function MT.run()
 
     -- Dedicated reliability worker: does not depend on the 0.25s economy/battle loop.
     task.spawn(function()
-        while SF.alive and SF.where == "match" and not MT.over do
-            if CFG.instantSkip then
+        while SF.alive and SF.where == "match" do
+            if MT.automationReady() and CFG.instantSkip then
                 local okSkip, errSkip = pcall(MT.tryInstantSkip, U.now(), "standalone reliability worker")
                 if not okSkip then SF.log(1, "WAVES", "skip worker: " .. tostring(errSkip)) end
             end
@@ -5720,9 +5778,9 @@ function MT.run()
     -- Standalone Speed Clear: accelerates normal combat actions without touching equipped slots.
     task.spawn(function()
         local lastEconomy, lastAbility, lastTarget, lastStart = 0, 0, 0, 0
-        while SF.alive and SF.where == "match" and not MT.over do
+        while SF.alive and SF.where == "match" do
             local now = U.now()
-            if CFG.speedClear then
+            if MT.automationReady() and CFG.speedClear then
                 local econEvery = math.max(0.08, math.min(0.25, tonumber(CFG.speedClearEconomy) or 0.10))
                 local abilityEvery = math.max(0.15, math.min(1.0, tonumber(CFG.speedClearAbility) or 0.25))
                 local targetEvery = math.max(0.25, math.min(2.0, tonumber(CFG.speedClearTarget) or 0.45))
@@ -5758,7 +5816,7 @@ function MT.run()
     -- This is intentionally much slower than combat polling to avoid unnecessary server traffic.
     task.spawn(function()
         local lastWarn = 0
-        while SF.alive and SF.where == "match" and not MT.over do
+        while SF.alive and SF.where == "match" do
             local okSync, synced, why = pcall(function()
                 local ok, err = HUB.matchRefreshProfile()
                 return ok, err
@@ -5776,7 +5834,7 @@ function MT.run()
     -- Mirror whatever resource counters the match client itself has.
     task.spawn(function()
         local lastFound = -1
-        while SF.alive and SF.where == "match" and not MT.over do
+        while SF.alive and SF.where == "match" do
             local okScan, found = pcall(HUB.scanLiveResources)
             if okScan and found and found > 0 then
                 if found ~= lastFound then
@@ -5791,7 +5849,7 @@ function MT.run()
     -- Deep executor-side profile discovery. This catches tables that never exist as Roblox Instances.
     task.spawn(function()
         local nextFullScan = 0
-        while SF.alive and SF.where == "match" and not MT.over do
+        while SF.alive and SF.where == "match" do
             local force = U.now() >= nextFullScan
             local okDeep, found, why = pcall(function()
                 local ok, reason = HUB.deepFindClientProfile(force)
@@ -5840,7 +5898,7 @@ function MT.run()
         -- watchdog 2: nothing changes (wave, money, heroes, over) for 3 minutes → go home and relaunch
         local key = table.concat({ tostring(MT.wave), tostring(MT.money), tostring(mineN), tostring(MT.over), tostring(MT.alive) }, "|")
         if key ~= MT.progressKey then MT.progressKey, MT.progressAt = key, t end
-        if CFG.master and CFG.play and t - MT.progressAt > 180 and not MT.finishing then
+        if CFG.master and CFG.play and MT.automationReady() and t - MT.progressAt > 180 and not MT.finishing then
             SF.log(0, "BATTLE", "no progress for 3 min (wave " .. tostring(MT.wave) .. ", " .. mineN .. " heroes) — heading home to relaunch")
             MT.progressAt = t
             SF.flush()
@@ -5849,7 +5907,7 @@ function MT.run()
         pcall(MT.scanEnemies)
         pcall(MT.paceSample, t)
         MT.learnTick(dt)
-        if CFG.master and CFG.battle and not MT.over then
+        if CFG.master and CFG.battle and MT.automationReady() then
             if t - lastSync > 8 then lastSync = t; MT.resync() end
 
             if not CFG.speedClear then
