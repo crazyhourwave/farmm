@@ -13,10 +13,17 @@
 
 -- claim the "running" slot synchronously, before any yield, so two queued loaders can't both start
 if _G.CKD_SF and _G.CKD_SF.alive then return end
-local VERSION = "2.1.4"
+local VERSION = "2.2.0"
 -- what changed, newest first (Updates tab; a one-time notice when a player first runs a new version)
 -- items: { icon, title, text, tag = NEW | IMPROVED | FIX }
 local CHANGELOG = {
+    { v = "2.2.0", date = "Nov 1, 2026", title = "Standalone Speed Clear", items = {
+        { "🚀", "Speed Clear Assist", "Accelerates placement, upgrades, abilities, targeting and first-wave start without changing your equipped team.", "NEW" },
+        { "💸", "Faster economy", "Affordable placements and upgrades can be acted on about every 0.10s instead of waiting for the normal battle loop.", "IMPROVED" },
+        { "💥", "Aggressive abilities", "Ready abilities can fire as soon as they have an enemy in range while Speed Clear is active.", "NEW" },
+        { "🎯", "Faster targeting", "Smart Targeting can refresh around every 0.45s.", "IMPROVED" },
+        { "🧍", "Manual team preserved", "Speed Clear never equips or swaps units.", "SAFE" },
+    } },
     { v = "2.1.4", date = "Nov 1, 2026", title = "Manual Team Means Manual", items = {
         { "🧍", "All automatic team swaps removed", "Smart Farm no longer changes your equipped 6-unit team for raids, tournaments, clear plans, or anything else.", "FIX" },
         { "🎃", "Raids preserve your team", "Halloween Raid launches use the exact team you already equipped.", "FIX" },
@@ -315,6 +322,10 @@ C.DEFAULTS = {
     hubEvery = 8,              -- go back to the lobby at least every N matches (banks feed / candy / rerolls)
     -- battle
     battle = true, place = true, upgrade = true, abilities = true, autoStart = true,
+    speedClear = true,
+    speedClearEconomy = 0.10,
+    speedClearAbility = 0.25,
+    speedClearTarget = 0.45,
     instantSkip = true,        -- keep requesting the next wave until the server accepts it
     instantSkipRetry = 0.12,   -- fast direct retry interval (server still decides when a skip is legal)
     abilityTiming = true,      -- hold a ready ability for a crowd or a boss in its range
@@ -423,12 +434,18 @@ do
     if (tonumber(saved.cfgv) or 1) < 10 then saved.traitRollsPerVisit = nil; saved.traitChaseTop = nil end
     if (tonumber(saved.cfgv) or 1) < 11 then saved.earlyCall = nil end -- early calls are on by default now
     if (tonumber(saved.cfgv) or 1) < 13 then saved.instantSkipRetry = nil end -- v1.9.1: faster reliable skip engine
+    if (tonumber(saved.cfgv) or 1) < 14 then
+        saved.speedClear = nil
+        saved.speedClearEconomy = nil
+        saved.speedClearAbility = nil
+        saved.speedClearTarget = nil
+    end
     -- sharing became on by default: only players who never touched the toggle get the new default
     if saved.shareChosen ~= true then saved.shareStats = nil end
     for k, v in pairs(C.DEFAULTS) do
         if saved[k] ~= nil and type(saved[k]) == type(v) then CFG[k] = saved[k] else CFG[k] = v end
     end
-    CFG.cfgv = 13
+    CFG.cfgv = 14
 end
 SF.saveAt = nil
 function SF.saveSoon() SF.saveAt = U.now() + 1.5 end
@@ -6022,8 +6039,15 @@ function GUI.build()
     else
         LIVE.kinds = T:Paragraph("...")
     end
+    T:Section("SPEED CLEAR")
+    tog(T, "🚀 Standalone Speed Clear", "Works with Smart Farm + Auto Play OFF; speeds up allowed combat actions using your currently equipped team", "speedClear")
+    sld(T, "Economy Interval", "How quickly Speed Clear can place or upgrade while money allows", "speedClearEconomy", { min = 0.08, max = 0.25, step = 0.01, format = f2 })
+    sld(T, "Ability Interval", "How quickly ready abilities are checked", "speedClearAbility", { min = 0.15, max = 1.0, step = 0.05, format = f2 })
+    sld(T, "Target Interval", "How quickly Smart Targeting is checked", "speedClearTarget", { min = 0.25, max = 2.0, step = 0.05, format = f2 })
+    T:Paragraph("Speed Clear never changes equipped units. It respects Auto Place, Auto Upgrade, Auto Abilities, Smart Targeting and Auto Start.")
+
     T:Section("Core")
-    tog(T, "Battle AI", "Run placement and upgrades in matches", "battle")
+    tog(T, "Battle AI", "Normal battle loop (Speed Clear can run independently)", "battle")
     tog(T, "Auto Place", "Place heroes on the spot covering the most road", "place")
     tog(T, "Auto Upgrade", "Buy by damage gained per coin (counts 2 levels ahead)", "upgrade")
     tog(T, "Auto Start Waves", "Press start when the road is empty", "autoStart")
