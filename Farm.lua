@@ -1,5 +1,5 @@
 --[[
-    🍬 Candy Kingdom Defense — Smart Farm v2.1.0  (NexusLib)
+    🍬 Candy Kingdom Defense — Smart Farm v2.1.1  (NexusLib)
 
     One script for both places of the game:
       • Lobby (Tree Fort):  rewards → feed → traits/stats → summon → pick the best mode → launch
@@ -13,10 +13,14 @@
 
 -- claim the "running" slot synchronously, before any yield, so two queued loaders can't both start
 if _G.CKD_SF and _G.CKD_SF.alive then return end
-local VERSION = "2.1.0"
+local VERSION = "2.1.1"
 -- what changed, newest first (Updates tab; a one-time notice when a player first runs a new version)
 -- items: { icon, title, text, tag = NEW | IMPROVED | FIX }
 local CHANGELOG = {
+    { v = "2.1.1", date = "Oct 31, 2026", title = "Halloween Raid YES Confirmation", items = {
+        { "✅", "PLAY AGAIN? confirmation", "Auto Continue now presses YES after POUR 1 BUG MILK before waiting for the next raid.", "FIX" },
+        { "🎯", "Scoped YES detection", "It only presses YES inside a visible PLAY AGAIN / Bug Milk confirmation popup.", "FIX" },
+    } },
     { v = "2.1.0", date = "Oct 31, 2026", title = "Standalone Auto-Skip + Raid Continue", items = {
         { "⚡", "Auto-Skip is standalone", "Reliable Instant Auto-Skip now works even when Smart Farm and Auto Play are both OFF.", "NEW" },
         { "🎃", "Halloween Raid auto-continue", "After a raid win: NEXT → POUR 1 BUG MILK → wait for the next raid, automatically.", "NEW" },
@@ -4387,6 +4391,59 @@ function MT.waitPressRaidButton(words, timeout, label)
     return false
 end
 
+function MT.findRaidPlayAgainYes()
+    local pg = LP:FindFirstChildOfClass("PlayerGui")
+    if not pg then return nil end
+
+    for _, obj in ipairs(pg:GetDescendants()) do
+        if obj:IsA("GuiButton") and raidGuiVisible(obj) then
+            local buttonText = ""
+            if obj:IsA("TextButton") then buttonText = obj.Text end
+            for _, d in ipairs(obj:GetDescendants()) do
+                if (d:IsA("TextLabel") or d:IsA("TextButton")) and raidGuiVisible(d) then
+                    buttonText = buttonText .. " " .. tostring(d.Text or "")
+                end
+            end
+
+            if raidTextNorm(buttonText):find("YES", 1, true) then
+                local curNode = obj.Parent
+                for _ = 1, 8 do
+                    if not curNode or curNode == pg then break end
+                    local chunks = {}
+                    for _, d in ipairs(curNode:GetDescendants()) do
+                        if (d:IsA("TextLabel") or d:IsA("TextButton")) and raidGuiVisible(d) then
+                            chunks[#chunks + 1] = d.Text
+                        end
+                    end
+                    local joined = raidTextNorm(table.concat(chunks, " "))
+                    if joined:find("PLAYAGAIN", 1, true) and joined:find("BUGMILK", 1, true) then
+                        return obj
+                    end
+                    curNode = curNode.Parent
+                end
+            end
+        end
+    end
+    return nil
+end
+
+function MT.waitPressRaidPlayAgainYes(timeout)
+    local untilAt = U.now() + (tonumber(timeout) or 8)
+    while SF.alive and U.now() < untilAt do
+        local btn = MT.findRaidPlayAgainYes()
+        if btn then
+            SF.status("Raid", "auto continue · confirming PLAY AGAIN")
+            local ok, how = MT.activateRaidButton(btn)
+            if ok then
+                SF.log(1, "RAID", "auto continue pressed PLAY AGAIN YES via " .. tostring(how))
+                return true
+            end
+        end
+        task.wait(0.15)
+    end
+    return false
+end
+
 function MT.autoContinueRaid()
     if not CFG.raidContinue then return false, "off" end
     if not MT.raid then return false, "not raid" end
@@ -4404,8 +4461,14 @@ function MT.autoContinueRaid()
         return false, "POUR 1 BUG MILK button not found (out of milk or UI changed)"
     end
 
-    SF.status("Raid", "🥛 Bug Milk poured · waiting for next raid")
-    SF.log(1, "RAID", "auto continue: NEXT → POUR 1 BUG MILK")
+    task.wait(0.15)
+    SF.status("Raid", "auto continue · waiting for PLAY AGAIN? → YES")
+    if not MT.waitPressRaidPlayAgainYes(10) then
+        return false, "PLAY AGAIN YES confirmation not found"
+    end
+
+    SF.status("Raid", "✅ PLAY AGAIN confirmed · waiting for next raid")
+    SF.log(1, "RAID", "auto continue: NEXT → POUR 1 BUG MILK → YES")
 
     -- Wait for the server to reset/start the next raid. Do not require Smart Farm or Auto Play.
     local deadline = U.now() + 20
@@ -5913,7 +5976,7 @@ function GUI.build()
     sld(T, "Replay When Stronger ×", "Team power growth needed for a replay", "tourneyRegrow", { min = 1, max = 2, step = 0.05, format = f2 })
     T:Section("🎃 Halloween Raid")
     tog(T, "Raids", "Smart Farm can choose and launch Halloween Raids", "raids")
-    tog(T, "Auto Continue Raid", "Standalone: after VICTORY press NEXT → POUR 1 BUG MILK → continue, even with Smart Farm / Auto Play OFF", "raidContinue")
+    tog(T, "Auto Continue Raid", "Standalone: VICTORY → NEXT → POUR 1 BUG MILK → PLAY AGAIN? → YES, even with Smart Farm / Auto Play OFF", "raidContinue")
     sld(T, "Raid Safety Margin", "Only raid if we'd still win against enemies this much tougher", "raidMinMargin", { min = 1, max = 2, step = 0.05, format = function(v) return string.format("+%d%%", math.floor((v - 1) * 100 + 0.5)) end })
     tog(T, "Farm Raid Keys", "Out of keys: Nightosphere Infinite", "infKeys")
     sld(T, "Keys To Hold", "Farm keys until you hold this many", "keyTarget", { min = 1, max = 10, step = 1, format = int })
