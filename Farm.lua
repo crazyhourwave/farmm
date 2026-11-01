@@ -3579,7 +3579,7 @@ function MT.options()
     return opts
 end
 function MT.economy()
-    if not (CFG.battle and MT.map) then return end
+    if not ((CFG.battle or CFG.speedClear) and MT.map) then return end
     local opts = MT.options()
     if #opts == 0 then return SF.status("Economy", "every unit placed and maxed") end
     local best = opts[1]
@@ -3676,7 +3676,11 @@ function MT.abilities()
                 local held = now - MT.abilityReady[id]
                 local why = boss and "boss in range" or (cnt >= need and (cnt .. " enemies in range"))
                     or (cnt > 0 and held >= CFG.abilityHold and ("held " .. math.floor(held) .. "s"))
-                if not CFG.abilityTiming then why = cnt > 0 and "ready" or nil end
+                if CFG.speedClear then
+                    why = cnt > 0 and "speed clear" or nil
+                elseif not CFG.abilityTiming then
+                    why = cnt > 0 and "ready" or nil
+                end
                 if why then
                     local res = SF.request("Act:ability:" .. id, C.R("Act"), "ability", id)
                     if type(res) == "table" and res.ok then
@@ -4540,8 +4544,13 @@ end
 function MT.finish()
     if MT.finishing then return end
     MT.finishing = true
-    -- wait just long enough for the result event (rewards) — at most 3s
-    for _ = 1, 12 do if MT.result then break end task.wait(0.25) end
+    -- Same 3s maximum, but Speed Clear notices the result sooner.
+    local resultPoll = CFG.speedClear and 0.05 or 0.25
+    local resultPolls = math.max(1, math.floor(3 / resultPoll))
+    for _ = 1, resultPolls do
+        if MT.result then break end
+        task.wait(resultPoll)
+    end
     local mode = B.pending or { stage = MT.stage }
     if mode.stage ~= MT.stage then mode = { stage = MT.stage, challenge = MT.challenge, infinite = MT.infinite } end
     if MT.tourney then mode = { stage = MT.stage, tourney = true } elseif MT.portal then mode.portal = true end
@@ -5242,6 +5251,46 @@ function MT.run()
         end
     end)
 
+    -- Standalone Speed Clear: accelerates normal combat actions without touching equipped slots.
+    task.spawn(function()
+        local lastEconomy, lastAbility, lastTarget, lastStart = 0, 0, 0, 0
+        while SF.alive and SF.where == "match" and not MT.over do
+            local now = U.now()
+            if CFG.speedClear then
+                local econEvery = math.max(0.08, math.min(0.25, tonumber(CFG.speedClearEconomy) or 0.10))
+                local abilityEvery = math.max(0.15, math.min(1.0, tonumber(CFG.speedClearAbility) or 0.25))
+                local targetEvery = math.max(0.25, math.min(2.0, tonumber(CFG.speedClearTarget) or 0.45))
+
+                if now - lastEconomy >= econEvery then
+                    lastEconomy = now
+                    local okEco, errEco = pcall(MT.economy)
+                    if not okEco then SF.log(1, "SPEED", "economy: " .. tostring(errEco)) end
+                end
+
+                if CFG.abilities and now - lastAbility >= abilityEvery then
+                    lastAbility = now
+                    local okAb, errAb = pcall(MT.abilities)
+                    if not okAb then SF.log(1, "SPEED", "abilities: " .. tostring(errAb)) end
+                end
+
+                if CFG.smartTarget and now - lastTarget >= targetEvery then
+                    lastTarget = now
+                    local okTarget, errTarget = pcall(MT.retarget)
+                    if not okTarget then SF.log(1, "SPEED", "targeting: " .. tostring(errTarget)) end
+                end
+
+                if CFG.autoStart and not MT.running and MT.enemies == 0 and U.count(MT.towers) > 0 and now - lastStart >= 0.12 then
+                    lastStart = now
+                    local _, errStart = MT.sendWaveStart("speed clear first wave")
+                    if errStart and errStart ~= "busy" and errStart ~= "not ready" then
+                        SF.log(2, "SPEED", "first-wave retry: " .. tostring(errStart))
+                    end
+                end
+            end
+            task.wait(0.05)
+        end
+    end)
+
     -- Keep the displayed resources authoritative during a match whenever CKD exposes GetProfile here.
     -- This is intentionally much slower than combat polling to avoid unnecessary server traffic.
     task.spawn(function()
@@ -5339,24 +5388,37 @@ function MT.run()
         MT.learnTick(dt)
         if CFG.master and CFG.battle and not MT.over then
             if t - lastSync > 8 then lastSync = t; MT.resync() end
-            local ok, e = pcall(MT.economy)
-            if not ok then SF.log(1, "BATTLE", "economy: " .. tostring(e)) end
-            local okC, eC = pcall(MT.callWave, t)
-            if not okC then SF.log(1, "WAVES", tostring(eC)) end
-            if t - lastTgt > 2 then lastTgt = t; pcall(MT.retarget) end
-            local startDelay = CFG.instantSkip and 0.12 or 3
-            if CFG.autoStart and not MT.running and MT.enemies == 0 and U.count(MT.towers) > 0 and t - lastStart > startDelay then
-                lastStart = t
-                if CFG.instantSkip then
-                    local _, errStart = MT.sendWaveStart("first wave")
-                    if errStart and errStart ~= "busy" and errStart ~= "not ready" then
-                        SF.log(2, "WAVES", "first-wave retry: " .. tostring(errStart))
+
+            if not CFG.speedClear then
+                local ok, e = pcall(MT.economy)
+                if not ok then SF.log(1, "BATTLE", "economy: " .. tostring(e)) end
+
+                if t - lastTgt > 2 then
+                    lastTgt = t
+                    pcall(MT.retarget)
+                end
+
+                local startDelay = CFG.instantSkip and 0.12 or 3
+                if CFG.autoStart and not MT.running and MT.enemies == 0 and U.count(MT.towers) > 0 and t - lastStart > startDelay then
+                    lastStart = t
+                    if CFG.instantSkip then
+                        local _, errStart = MT.sendWaveStart("first wave")
+                        if errStart and errStart ~= "busy" and errStart ~= "not ready" then
+                            SF.log(2, "WAVES", "first-wave retry: " .. tostring(errStart))
+                        end
+                    else
+                        SF.request("Act:start", C.R("Act"), "start")
                     end
-                else
-                    SF.request("Act:start", C.R("Act"), "start")
+                end
+
+                if t - lastAb > 1 then
+                    lastAb = t
+                    pcall(MT.abilities)
                 end
             end
-            if t - lastAb > 1 then lastAb = t; pcall(MT.abilities) end
+
+            local okC, eC = pcall(MT.callWave, t)
+            if not okC then SF.log(1, "WAVES", tostring(eC)) end
         end
         local myN, myLv = 0, 0
         for _, tw in pairs(MT.towers) do if MT.mine(tw) then myN = myN + 1; myLv = myLv + tw.level end end
