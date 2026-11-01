@@ -1,5 +1,5 @@
 --[[
-    🍬 Candy Kingdom Defense — Smart Farm v2.3.6  (NexusLib)
+    🍬 Candy Kingdom Defense — Smart Farm v2.3.7  (NexusLib)
 
     One script for both places of the game:
       • Lobby (Tree Fort):  rewards → feed → traits/stats → summon → pick the best mode → launch
@@ -12,7 +12,7 @@
 ]]
 
 -- Claim the running slot synchronously. A newer build replaces an older live copy instead of silently returning.
-local VERSION = "2.3.6"
+local VERSION = "2.3.7"
 do
     local old = _G.CKD_SF
     if old and old.alive then
@@ -30,6 +30,11 @@ end
 -- what changed, newest first (Updates tab; a one-time notice when a player first runs a new version)
 -- items: { icon, title, text, tag = NEW | IMPROVED | FIX }
 local CHANGELOG = {
+    { v = "2.3.7", date = "Nov 1, 2026", title = "Auto-Start Wave 1 State Fix", items = {
+        { "▶️", "Clears stale wave state", "NEXT/replay now clears the previous round's waveStartAt, waveSpawned and wave expectation before Auto-Start evaluates the new round.", "FIX" },
+        { "🆕", "Per-round wave marker", "START WAVE 1 detection now uses a fresh wave-event marker instead of stale running/timestamp state.", "FIX" },
+        { "🔁", "Persistent watchdog retained", "The standalone Auto-Start worker continues running across every NEXT/replay round.", "FIX" },
+    } },
     { v = "2.3.6", date = "Nov 1, 2026", title = "Replay / NEXT Automation Rearm", items = {
         { "🔁", "Workers survive round endings", "Auto Start, Speed Clear, Auto-Skip and placement workers now stay alive for the entire match server instead of dying after the first win.", "FIX" },
         { "▶️", "Wait for the new round", "After NEXT/replay, Smart Farm polls Sync until CKD actually reports the new round before resuming automation.", "FIX" },
@@ -4162,13 +4167,11 @@ end
 
 function MT.firstWaveStarted()
     if MT.over then return true end
+    if MT.roundWaveSeen == true then return true end
     if (tonumber(MT.wave) or 0) > 1 then return true end
     if (tonumber(MT.enemies) or 0) > 0 then return true end
     if (tonumber(MT.waveSpawned) or 0) > 0 then return true end
-
-    -- A real wave event sets MT.running=true and waveStartAt. Sync can be slightly ahead/behind,
-    -- so require one of the stronger signs above before declaring the first wave started.
-    return MT.running == true and MT.waveStartAt ~= nil
+    return false
 end
 
 function MT.tryStartFirstWave(now, reason)
@@ -4181,7 +4184,8 @@ function MT.tryStartFirstWave(now, reason)
 
     local res, err = MT.sendWaveStart(reason or "first-wave watchdog")
     if res and (type(res) ~= "table" or res.ok ~= false) then
-        SF.status("Waves", "▶ START WAVE 1 sent · waiting for wave event")
+        SF.status("Waves", "▶ AUTO START sent · waiting for Wave 1")
+        MT.lastFirstWaveSendOkAt = now
         return true
     end
 
@@ -4536,7 +4540,7 @@ function MT.onEvent(seq, name, d)
         if MT.runLeaks == 1 then MT.learnAggr("leak") end
         SF.log(1, "BATTLE", string.format("leak! lives %s%s", tostring(MT.lives), MT.earlyCalls > 0 and (" · early calls off, boldness → x" .. string.format("%.2f", MT.aggr)) or ""))
     elseif name == "wave" then
-        MT.wave = d.wave or MT.wave; MT.running = true; MT.waveStartAt = U.now(); MT.waveSpawned = 0
+        MT.wave = d.wave or MT.wave; MT.running = true; MT.waveStartAt = U.now(); MT.waveSpawned = 0; MT.roundWaveSeen = true
         MT.lastSkipAttemptAt, MT.skipLoggedWave = 0, nil
         if CFG.instantSkip then
             task.defer(function()
@@ -4607,6 +4611,12 @@ function MT.resetRun()
     MT.runLeaks, MT.earlyCalls, MT.runReach, MT.waveReach = 0, 0, 0, 0
     MT.lastSkipAttemptAt, MT.skipLoggedWave, MT.skipBusy = 0, nil, false
     MT.lastFirstWaveStartAt = 0
+    MT.lastFirstWaveSendOkAt = nil
+    MT.roundWaveSeen = false
+    MT.waveStartAt = nil
+    MT.waveSpawned = 0
+    MT.waveExpect = nil
+    MT.lastCallAt = 0
     MT._waveActRemote = nil
     MT.paceSum, MT.paceN, MT.paceLast, MT.paceAt = 0, 0, nil, 0
     MT.cdSum, MT.cdN, MT.spanSum, MT.spanN, MT.cdDue, MT.cdStartAt, MT.spanRaw = 0, 0, 0, 0, nil, nil, {}
@@ -4704,6 +4714,10 @@ function MT.waitForFreshRound(timeout)
         MT.joinedMidRun = false
         MT.progressAt, MT.progressKey = U.now(), ""
         MT.lastFirstWaveStartAt = 0
+        MT.roundWaveSeen = false
+        MT.waveStartAt = nil
+        MT.waveSpawned = 0
+        MT.waveExpect = nil
         SF.req.back["Act:start"] = nil
         SF.log(1, "BATTLE", "new round confirmed · automation re-armed")
     else
@@ -5757,7 +5771,12 @@ function MT.run()
     task.spawn(function()
         while SF.alive and SF.where == "match" do
             if MT.automationReady() and CFG.autoStart and not MT.firstWaveStarted() then
-                pcall(MT.tryStartFirstWave, U.now(), "standalone first-wave watchdog")
+                local now = U.now()
+                if MT.lastFirstWaveSendOkAt and now - MT.lastFirstWaveSendOkAt > 2.0 then
+                    MT._waveActRemote = nil
+                    MT.lastFirstWaveSendOkAt = nil
+                end
+                pcall(MT.tryStartFirstWave, now, "standalone first-wave watchdog")
             end
             task.wait(0.20)
         end
