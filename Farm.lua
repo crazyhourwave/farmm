@@ -1,5 +1,5 @@
 --[[
-    🍬 Candy Kingdom Defense — Smart Farm v2.3.2  (NexusLib)
+    🍬 Candy Kingdom Defense — Smart Farm v2.3.3  (NexusLib)
 
     One script for both places of the game:
       • Lobby (Tree Fort):  rewards → feed → traits/stats → summon → pick the best mode → launch
@@ -11,12 +11,31 @@
     win rates and run times). Settings: CKD_SmartFarm/settings.json · learning: CKD_SmartFarm/brain.json
 ]]
 
--- claim the "running" slot synchronously, before any yield, so two queued loaders can't both start
-if _G.CKD_SF and _G.CKD_SF.alive then return end
-local VERSION = "2.3.2"
+-- Claim the running slot synchronously. A newer build replaces an older live copy instead of silently returning.
+local VERSION = "2.3.3"
+do
+    local old = _G.CKD_SF
+    if old and old.alive then
+        if old.VERSION == VERSION then return end
+        pcall(function()
+            if type(old.unload) == "function" then
+                old.unload()
+            else
+                old.alive = false
+            end
+        end)
+        if _G.CKD_SF == old then _G.CKD_SF = nil end
+    end
+end
 -- what changed, newest first (Updates tab; a one-time notice when a player first runs a new version)
 -- items: { icon, title, text, tag = NEW | IMPROVED | FIX }
 local CHANGELOG = {
+    { v = "2.3.3", date = "Nov 1, 2026", title = "Strict Half-Hour Train Gate", items = {
+        { "🕒", "No early lobby returns", "FIRST WIN priority cannot interrupt Normal Grind before a real :00 / :30 boundary.", "FIX" },
+        { "🔄", "Requires an actual Train rotation", "At the boundary, Smart Farm waits for the Dungeon Train challenge IDs to change before marking FIRST WIN work due.", "FIX" },
+        { "🚂", "Clear all 3 before resuming", "The refresh session stays active through every unclaimed car, then Normal Grind resumes.", "FIX" },
+        { "♻️", "New loader replaces old UI", "Running a newer pinned loader now unloads an older Smart Farm instance instead of leaving the old version alive.", "FIX" },
+    } },
     { v = "2.3.2", date = "Nov 1, 2026", title = "First-Wave Deadlock Fix", items = {
         { "▶️", "START WAVE 1 watchdog", "Smart Farm now retries the first-wave Start request until the match actually begins, even if tower sync is late.", "FIX" },
         { "🔁", "No tower-count dependency", "A missing/stale MT.towers snapshot can no longer leave the run sitting forever on START WAVE 1.", "FIX" },
@@ -207,7 +226,7 @@ local CHANGELOG = {
         { "💬", "Join Discord button", "On the Main tab: copies the community invite.", "NEW" },
     } },
 }
-local SF = { alive = true, conns = {} }
+local SF = { alive = true, conns = {}, VERSION = VERSION }
 _G.CKD_SF = SF
 if not game:IsLoaded() then game.Loaded:Wait() end
 
@@ -516,7 +535,8 @@ do
     B.challengeClockRetryUntil = tonumber(b.challengeClockRetryUntil) or 0
     B.challengeClockLastProbe = tonumber(b.challengeClockLastProbe) or 0
     B.challengeClockFirst = tonumber(b.challengeClockFirst) or 0
-    B.challengeRefreshDue = b.challengeRefreshDue == true
+    B.challengeDueBucket = tonumber(b.challengeDueBucket)
+    B.challengeRefreshDue = b.challengeRefreshDue == true and B.challengeDueBucket ~= nil
     B.lastReport = tonumber(b.lastReport) or 0                              -- last anonymous stats report (opt-in)
     B.powerHub = b.powerHub == true
     B.traitLog = type(b.traitLog) == "table" and b.traitLog or nil         -- trait chases {at, clock, kind, goal, rolls, spent, from, to, hit}
@@ -1384,7 +1404,9 @@ function C.MODE.pick(prof)
     -- may temporarily interrupt it when Auto First-Win Bonuses is enabled.
     if CFG.normalLoop then
         local firstChallenge
-        if CFG.challenges and CFG.challengeFirstPriority then
+        local trainDue = B.challengeRefreshDue == true
+            and tonumber(B.challengeDueBucket) == C.MODE.challengeClockBucket(now)
+        if CFG.challenges and CFG.challengeFirstPriority and trainDue then
             for _, m in ipairs(scored) do
                 if m.challenge and m.challengeFirst and (m.value or 0) > 0 then
                     if not firstChallenge
@@ -1546,18 +1568,115 @@ end
 function C.MODE.challengeClockCheck(prof, force, reason)
     local now = os.time()
     local bucket = C.MODE.challengeClockBucket(now)
-    local boundaryChanged = B.challengeClockBucket ~= nil and B.challengeClockBucket ~= bucket
-    local shouldProbe = force or B.challengeClockBucket == nil or boundaryChanged
-        or (now < (tonumber(B.challengeClockRetryUntil) or 0)
-            and now - (tonumber(B.challengeClockLastProbe) or 0) >= 5)
+    local oldBucket = tonumber(B.challengeClockBucket)
+    local oldCheckedAt = tonumber(B.challengeClockCheckedAt) or 0
+    local oldSig = B.challengeClockSig
+    local retryUntil = tonumber(B.challengeClockRetryUntil) or 0
+    local lastProbe = tonumber(B.challengeClockLastProbe) or 0
+
+    local dueThisBucket = B.challengeRefreshDue == true and tonumber(B.challengeDueBucket) == bucket
+    local boundaryChanged = oldBucket ~= nil and oldBucket ~= bucket
+    local crossedDuringTeleport = boundaryChanged and oldCheckedAt > 0 and (now - oldCheckedAt) <= 120
+    local retryActive = now < retryUntil
+    local shouldProbe = force or oldBucket == nil or boundaryChanged
+        or (retryActive and now - lastProbe >= 5)
+        or (dueThisBucket and now - lastProbe >= 2)
 
     if not shouldProbe then
         return tonumber(B.challengeClockFirst) or 0, false
     end
 
-    local oldSig = B.challengeClockSig
     local sig, firsts = C.MODE.challengeSnapshot(prof, now)
     local sigChanged = oldSig ~= nil and sig ~= oldSig
+
+    -- A forced check at script/teleport startup is a baseline, NOT permission to leave the current grind.
+    -- Only preserve an already-active refresh session from this same half-hour bucket.
+    if force then
+        if dueThisBucket then
+            if #firsts == 0 then
+                B.challengeRefreshDue = false
+                B.challengeDueBucket = nil
+                B.challengeClockRetryUntil = 0
+                SF.log(1, "TRAIN", "all FIRST WIN cars from this refresh are complete → Normal Grind resumes")
+            end
+        elseif crossedDuringTeleport then
+            -- If teleport straddled :00/:30 by only a few seconds, treat it like a live boundary observation.
+            B.challengeClockRetryUntil = now + 75
+            if sigChanged and #firsts > 0 and CFG.challenges and CFG.challengeFirstPriority then
+                B.challengeRefreshDue = true
+                B.challengeDueBucket = bucket
+                SF.log(1, "TRAIN", string.format("Train rotated during teleport · %d FIRST WIN car%s ready",
+                    #firsts, #firsts == 1 and "" or "s"))
+            else
+                B.challengeRefreshDue = false
+                B.challengeDueBucket = nil
+            end
+        else
+            -- Starting/reloading at 3:27, 4:12, etc. merely records the current Train.
+            -- It must wait for the NEXT :00/:30 boundary.
+            B.challengeRefreshDue = false
+            B.challengeDueBucket = nil
+            B.challengeClockRetryUntil = 0
+        end
+
+        B.challengeClockBucket = bucket
+        B.challengeClockSig = sig
+        B.challengeClockCheckedAt = now
+        B.challengeClockLastProbe = now
+        B.challengeClockNextAt = C.MODE.challengeNextClockAt(now)
+        B.challengeClockFirst = #firsts
+        SF.saveSoon()
+        return #firsts, false
+    end
+
+    if boundaryChanged then
+        -- We observed a real half-hour boundary while the script was alive.
+        -- Do NOT claim old visible first-wins unless the Train's challenge IDs actually rotate.
+        B.challengeClockRetryUntil = now + 75
+        B.challengeRefreshDue = false
+        B.challengeDueBucket = nil
+
+        SF.log(1, "TRAIN", string.format(
+            "half-hour boundary %s · waiting for Dungeon Train rotation",
+            C.MODE.challengeLocalTime(now)
+        ))
+
+        if sigChanged then
+            if #firsts > 0 and CFG.challenges and CFG.challengeFirstPriority then
+                B.challengeRefreshDue = true
+                B.challengeDueBucket = bucket
+            end
+            B.challengeClockRetryUntil = 0
+            SF.log(1, "TRAIN", string.format(
+                "Dungeon Train rotated · %d FIRST WIN car%s ready",
+                #firsts, #firsts == 1 and "" or "s"
+            ))
+        end
+    elseif retryActive and sigChanged then
+        -- CKD rotated a few seconds after :00/:30.
+        B.challengeClockRetryUntil = 0
+        if #firsts > 0 and CFG.challenges and CFG.challengeFirstPriority then
+            B.challengeRefreshDue = true
+            B.challengeDueBucket = bucket
+        else
+            B.challengeRefreshDue = false
+            B.challengeDueBucket = nil
+        end
+        SF.log(1, "TRAIN", string.format(
+            "Dungeon Train late refresh detected · %d FIRST WIN car%s ready",
+            #firsts, #firsts == 1 and "" or "s"
+        ))
+    elseif dueThisBucket then
+        -- Stay in the same refresh session through Car 1/2/3. Only clear it when all first wins are gone.
+        if #firsts == 0 then
+            B.challengeRefreshDue = false
+            B.challengeDueBucket = nil
+            B.challengeClockRetryUntil = 0
+            SF.log(1, "TRAIN", "all FIRST WIN cars cleared → resuming Normal Grind")
+        end
+    elseif retryActive and now >= retryUntil then
+        B.challengeClockRetryUntil = 0
+    end
 
     B.challengeClockBucket = bucket
     B.challengeClockSig = sig
@@ -1566,31 +1685,9 @@ function C.MODE.challengeClockCheck(prof, force, reason)
     B.challengeClockNextAt = C.MODE.challengeNextClockAt(now)
     B.challengeClockFirst = #firsts
 
-    if boundaryChanged then
-        -- Keep probing after :00/:30 so a slightly-late server rotation is still caught.
-        B.challengeClockRetryUntil = now + 75
-        SF.log(1, "TRAIN", string.format(
-            "half-hour check %s · %d FIRST WIN car%s visible",
-            C.MODE.challengeLocalTime(now), #firsts, #firsts == 1 and "" or "s"
-        ))
-    elseif sigChanged then
-        B.challengeClockRetryUntil = 0
-        SF.log(1, "TRAIN", string.format(
-            "Dungeon Train cars refreshed · %d FIRST WIN car%s ready",
-            #firsts, #firsts == 1 and "" or "s"
-        ))
-    end
-
-    if #firsts > 0 and CFG.challenges and CFG.challengeFirstPriority then
-        B.challengeRefreshDue = true
-    elseif sigChanged or now >= (tonumber(B.challengeClockRetryUntil) or 0) then
-        B.challengeRefreshDue = false
-    end
-
     SF.saveSoon()
     return #firsts, sigChanged or boundaryChanged
 end
-
 function C.MODE.challengeClockCountdown()
     local now = os.time()
     local nextAt = C.MODE.challengeNextClockAt(now)
@@ -3313,7 +3410,7 @@ function HUB.play()
         }
         if m.challenge then
             B.challengeLast = m.challenge
-            B.challengeRefreshDue = false
+            -- Keep challengeRefreshDue active until the refreshed Train has no FIRST WIN cars left.
         end
         B.sinceHub = 0
         SF.saveNow()
@@ -5436,7 +5533,9 @@ function MT.run()
         while SF.alive and SF.where == "match" and not MT.over do
             if CFG.challenges and CFG.challengeFirstPriority then
                 local okClock, firsts = pcall(C.MODE.challengeClockCheck, B.prof, false, "match clock")
-                if okClock and tonumber(firsts) and firsts > 0 and B.challengeRefreshDue
+                local dueNow = B.challengeRefreshDue == true
+                    and tonumber(B.challengeDueBucket) == C.MODE.challengeClockBucket(os.time())
+                if okClock and tonumber(firsts) and firsts > 0 and dueNow
                     and CFG.master and CFG.play and MT.infinite and not MT.raid and not MT.tourney and not MT.portal then
                     SF.status("Mode", "🏆 FIRST WIN refresh detected · leaving Infinite")
                     SF.log(1, "TRAIN", "fresh FIRST WIN cars detected during Infinite → returning to lobby")
@@ -6613,8 +6712,9 @@ function GUI.updateTabs()
             sub = (function()
                 local nextCheck, left = C.MODE.challengeClockCountdown()
                 return string.format(
-                    "%s · next half-hour check %s · %dm %02ds · ★ first-win · ✓ repeat",
+                    "%s · %s · next check %s · %dm %02ds",
                     modeName or "Challenge mode",
+                    (B.challengeRefreshDue and "🏆 refresh ACTIVE" or "⏳ waiting for :00 / :30"),
                     C.MODE.challengeLocalTime(nextCheck),
                     math.floor(left / 60), left % 60
                 )
