@@ -1,5 +1,5 @@
 --[[
-    🍬 Candy Kingdom Defense — Smart Farm v2.3.4  (NexusLib)
+    🍬 Candy Kingdom Defense — Smart Farm v2.3.5  (NexusLib)
 
     One script for both places of the game:
       • Lobby (Tree Fort):  rewards → feed → traits/stats → summon → pick the best mode → launch
@@ -12,7 +12,7 @@
 ]]
 
 -- Claim the running slot synchronously. A newer build replaces an older live copy instead of silently returning.
-local VERSION = "2.3.4"
+local VERSION = "2.3.5"
 do
     local old = _G.CKD_SF
     if old and old.alive then
@@ -30,6 +30,12 @@ end
 -- what changed, newest first (Updates tab; a one-time notice when a player first runs a new version)
 -- items: { icon, title, text, tag = NEW | IMPROVED | FIX }
 local CHANGELOG = {
+    { v = "2.3.5", date = "Nov 1, 2026", title = "Locked Dungeon Train Handoff", items = {
+        { "🔒", "FIRST WIN job survives lobby teleport", "Once a refreshed Train is chosen, Normal Grind is blocked until the queued FIRST WIN work launches or is confirmed complete.", "FIX" },
+        { "🚂", "Lobby cannot forget the Train", "The exact refreshed challenge IDs are saved before returning to lobby and restored after teleport/reload.", "FIX" },
+        { "3️⃣", "Clear every queued car", "The lock stays active through Car 1, Car 2 and Car 3, then releases back to Normal Grind.", "FIX" },
+        { "🗺️", "No lobby → Candy Road bounce", "A pending Dungeon Train job now overrides the normal-stage picker at the launch point itself.", "FIX" },
+    } },
     { v = "2.3.4", date = "Nov 1, 2026", title = "Recover Current Dungeon Train Cycle", items = {
         { "🕞", "3:30 cycle recovery", "Loading/reloading shortly after :00 or :30 now recognizes the already-refreshed current Train instead of waiting another 30 minutes.", "FIX" },
         { "🚂", "Current challenge IDs win", "If the current half-hour's challenge set is unclaimed, FIRST WIN priority activates immediately.", "FIX" },
@@ -543,6 +549,7 @@ do
     B.challengeClockFirst = tonumber(b.challengeClockFirst) or 0
     B.challengeDueBucket = tonumber(b.challengeDueBucket)
     B.challengeRefreshDue = b.challengeRefreshDue == true and B.challengeDueBucket ~= nil
+    B.challengeJob = type(b.challengeJob) == "table" and b.challengeJob or nil
     B.lastReport = tonumber(b.lastReport) or 0                              -- last anonymous stats report (opt-in)
     B.powerHub = b.powerHub == true
     B.traitLog = type(b.traitLog) == "table" and b.traitLog or nil         -- trait chases {at, clock, kind, goal, rolls, spent, from, to, hit}
@@ -1571,6 +1578,97 @@ function C.MODE.challengeSnapshot(prof, at)
     return table.concat(ids, "|"), firsts, chs
 end
 
+function C.MODE.challengeJobActive()
+    local j = B.challengeJob
+    if type(j) ~= "table" then return false end
+    return tonumber(j.bucket) == C.MODE.challengeClockBucket(os.time())
+        and type(j.ids) == "table" and #j.ids > 0
+end
+
+function C.MODE.lockChallengeJob(prof, reason)
+    prof = prof or B.prof or {}
+    local now = os.time()
+    local bucket = C.MODE.challengeClockBucket(now)
+    local sig, firsts = C.MODE.challengeSnapshot(prof, now)
+    if #firsts == 0 then return false, "no FIRST WIN cars" end
+
+    local ids = {}
+    for _, f in ipairs(firsts) do ids[#ids + 1] = tostring(f.id) end
+
+    B.challengeJob = {
+        bucket = bucket,
+        sig = sig,
+        ids = ids,
+        at = now,
+        reason = tostring(reason or "refresh"),
+    }
+    B.challengeRefreshDue = true
+    B.challengeDueBucket = bucket
+    B.challengeClockFirst = #firsts
+    SF.saveNow()
+    SF.log(1, "TRAIN", string.format(
+        "locked FIRST WIN handoff · %d car%s · %s",
+        #ids, #ids == 1 and "" or "s", tostring(reason or "refresh")
+    ))
+    return true
+end
+
+function C.MODE.clearChallengeJob(reason)
+    if B.challengeJob or B.challengeRefreshDue then
+        SF.log(1, "TRAIN", "FIRST WIN handoff released · " .. tostring(reason or "complete"))
+    end
+    B.challengeJob = nil
+    B.challengeRefreshDue = false
+    B.challengeDueBucket = nil
+    SF.saveSoon()
+end
+
+function C.MODE.challengeJobPick(prof)
+    prof = prof or B.prof or {}
+    local j = B.challengeJob
+    if type(j) ~= "table" then return nil, "none" end
+
+    local now = os.time()
+    local bucket = C.MODE.challengeClockBucket(now)
+    if tonumber(j.bucket) ~= bucket then
+        C.MODE.clearChallengeJob("half-hour cycle expired")
+        return nil, "expired"
+    end
+
+    local allowed = {}
+    for _, id in ipairs(type(j.ids) == "table" and j.ids or {}) do
+        allowed[tostring(id)] = true
+    end
+
+    local _, firsts = C.MODE.challengeSnapshot(prof, now)
+    local remaining = {}
+    for _, f in ipairs(firsts) do
+        if allowed[tostring(f.id)] then remaining[tostring(f.id)] = true end
+    end
+
+    if next(remaining) == nil then
+        C.MODE.clearChallengeJob("all queued FIRST WIN cars complete")
+        return nil, "complete"
+    end
+
+    local best
+    for _, m in ipairs(C.MODE.candidates(prof, now)) do
+        if m.challenge and m.challengeFirst and remaining[tostring(m.challenge)] then
+            if not best or (tonumber(m.challengeSlot) or 999) < (tonumber(best.challengeSlot) or 999) then
+                best = m
+            end
+        end
+    end
+
+    if best then
+        C.MODE.challengeLoop = string.format("LOCKED FIRST WIN · car %s", tostring(best.challengeSlot or "?"))
+        return best, "locked"
+    end
+
+    -- The authoritative profile/challenge list may arrive a moment after teleport.
+    return nil, "waiting"
+end
+
 function C.MODE.challengeClockCheck(prof, force, reason)
     local now = os.time()
     local bucket = C.MODE.challengeClockBucket(now)
@@ -1598,6 +1696,11 @@ function C.MODE.challengeClockCheck(prof, force, reason)
     -- A forced check at script/teleport startup is a baseline, NOT permission to leave the current grind.
     -- Only preserve an already-active refresh session from this same half-hour bucket.
     if force then
+        local lockedJob = C.MODE.challengeJobActive()
+        if lockedJob then
+            B.challengeRefreshDue = true
+            B.challengeDueBucket = bucket
+        end
         local bucketStartedAt = bucket * 1800
         local sinceBoundary = math.max(0, now - bucketStartedAt)
         local nearBoundary = sinceBoundary <= 10 * 60
@@ -1606,12 +1709,14 @@ function C.MODE.challengeClockCheck(prof, force, reason)
             and CFG.challenges and CFG.challengeFirstPriority
             and (enteredNewBucket or sigChanged or nearBoundary)
 
-        if dueThisBucket then
+        if lockedJob then
+            -- A match already committed us to this Train cycle. Do not let hub startup rebaseline it away.
+            B.challengeRefreshDue = true
+            B.challengeDueBucket = bucket
+        elseif dueThisBucket then
             if #firsts == 0 then
-                B.challengeRefreshDue = false
-                B.challengeDueBucket = nil
+                C.MODE.clearChallengeJob("all FIRST WIN cars from this refresh are complete")
                 B.challengeClockRetryUntil = 0
-                SF.log(1, "TRAIN", "all FIRST WIN cars from this refresh are complete → Normal Grind resumes")
             end
         elseif recoveredCurrentCycle then
             -- Example: the loader starts at 3:32 after the 3:30 Train already rotated.
@@ -3402,7 +3507,19 @@ function HUB.play()
     local p = HUB.refresh(true)
     if not p then return end
     if C.Catalog.teamSize(p) == 0 then return SF.status("Mode", "no team") end
-    local m = C.MODE.pick(p)
+
+    local m
+    if C.MODE.challengeJobActive() then
+        local locked, state = C.MODE.challengeJobPick(p)
+        if locked then
+            m = locked
+            SF.status("Mode", "🏆 locked Dungeon Train handoff · launching car " .. tostring(m.challengeSlot or "?"))
+        elseif state == "waiting" then
+            return SF.status("Mode", "🏆 Dungeon Train handoff locked · waiting for refreshed car data")
+        end
+    end
+
+    m = m or C.MODE.pick(p)
     if not m then return SF.status("Mode", "no playable mode") end
     SF.status("Mode", "launching " .. C.MODE.describe(m))
     SF.log(1, "MODE", "pick " .. C.MODE.describe(m) .. "  ·  ranking: " .. tostring(C.MODE.lastTop) .. (C.MODE.raidGate and ("  ·  " .. C.MODE.raidGate) or ""))
@@ -3433,7 +3550,12 @@ function HUB.play()
         }
         if m.challenge then
             B.challengeLast = m.challenge
-            -- Keep challengeRefreshDue active until the refreshed Train has no FIRST WIN cars left.
+            if C.MODE.challengeJobActive() then
+                B.challengeJob.last = tostring(m.challenge)
+                B.challengeJob.lastSlot = m.challengeSlot
+                B.challengeJob.launchAt = os.time()
+            end
+            -- Keep the handoff locked until the lobby profile confirms every queued FIRST WIN is complete.
         end
         B.sinceHub = 0
         SF.saveNow()
@@ -4984,8 +5106,9 @@ function MT.finish()
     -- losing the challenge id, which turns the next run into a normal stage. Returning to the Train is a
     -- little slower but preserves the exact challenge id and lets challengesAt(os.time()) see refreshed cars.
     if CFG.normalLoop and pick and pick.challenge and pick.challengeFirst and not MT.raid and not MT.tourney and not MT.portal then
+        pcall(C.MODE.lockChallengeJob, B.prof, "normal match finished → FIRST WIN")
         action = "home"
-        why = "Dungeon Train FIRST WIN priority · switching from Normal Grind to car " .. tostring(pick.challengeSlot or "?")
+        why = "Dungeon Train FIRST WIN priority · locked handoff to car " .. tostring(pick.challengeSlot or "?")
     elseif CFG.normalLoop and pick and pick.manual and not MT.raid and not MT.tourney and not MT.portal then
         if pick.infinite then
             action = "home"
@@ -5561,7 +5684,8 @@ function MT.run()
                 if okClock and tonumber(firsts) and firsts > 0 and dueNow
                     and CFG.master and CFG.play and MT.infinite and not MT.raid and not MT.tourney and not MT.portal then
                     SF.status("Mode", "🏆 FIRST WIN refresh detected · leaving Infinite")
-                    SF.log(1, "TRAIN", "fresh FIRST WIN cars detected during Infinite → returning to lobby")
+                    SF.log(1, "TRAIN", "fresh FIRST WIN cars detected during Infinite → locking lobby handoff")
+                    pcall(C.MODE.lockChallengeJob, B.prof, "Infinite interrupted by refreshed Train")
                     SF.flush()
                     SF.request("ReturnToHub", C.R("ReturnToHub"))
                     return
@@ -5789,6 +5913,9 @@ function HUB.run()
     end
     HUB.refresh(true)
     pcall(C.MODE.challengeClockCheck, HUB.prof, true, "hub start")
+    if B.challengeRefreshDue and not C.MODE.challengeJobActive() then
+        pcall(C.MODE.lockChallengeJob, HUB.prof, "hub recovered current Train refresh")
+    end
     local nextAt = {}
     local settleAt = U.now() + 1.5 -- every lobby second is dead time between maps: launch as soon as chores are done
     while SF.alive and SF.where == "hub" do
@@ -6737,9 +6864,11 @@ function GUI.updateTabs()
                 return string.format(
                     "%s · %s · next check %s · %dm %02ds",
                     modeName or "Challenge mode",
-                    (B.challengeRefreshDue
-                        and ("🏆 current " .. C.MODE.challengeLocalTime(C.MODE.challengeClockBucket(os.time()) * 1800) .. " cycle ACTIVE")
-                        or "⏳ waiting for :00 / :30"),
+                    (C.MODE.challengeJobActive()
+                        and "🔒 FIRST WIN handoff LOCKED"
+                        or B.challengeRefreshDue
+                            and ("🏆 current " .. C.MODE.challengeLocalTime(C.MODE.challengeClockBucket(os.time()) * 1800) .. " cycle ACTIVE")
+                            or "⏳ waiting for :00 / :30"),
                     C.MODE.challengeLocalTime(nextCheck),
                     math.floor(left / 60), left % 60
                 )
