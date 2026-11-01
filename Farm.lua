@@ -1,5 +1,5 @@
 --[[
-    🍬 Candy Kingdom Defense — Smart Farm v2.1.3  (NexusLib)
+    🍬 Candy Kingdom Defense — Smart Farm v2.3.2  (NexusLib)
 
     One script for both places of the game:
       • Lobby (Tree Fort):  rewards → feed → traits/stats → summon → pick the best mode → launch
@@ -13,10 +13,15 @@
 
 -- claim the "running" slot synchronously, before any yield, so two queued loaders can't both start
 if _G.CKD_SF and _G.CKD_SF.alive then return end
-local VERSION = "2.3.1"
+local VERSION = "2.3.2"
 -- what changed, newest first (Updates tab; a one-time notice when a player first runs a new version)
 -- items: { icon, title, text, tag = NEW | IMPROVED | FIX }
 local CHANGELOG = {
+    { v = "2.3.2", date = "Nov 1, 2026", title = "First-Wave Deadlock Fix", items = {
+        { "▶️", "START WAVE 1 watchdog", "Smart Farm now retries the first-wave Start request until the match actually begins, even if tower sync is late.", "FIX" },
+        { "🔁", "No tower-count dependency", "A missing/stale MT.towers snapshot can no longer leave the run sitting forever on START WAVE 1.", "FIX" },
+        { "🏆", "Dungeon Train handoff preserved", "FIRST WIN priority still returns to the lobby and launches the queued challenge after the current normal match.", "FIX" },
+    } },
     { v = "2.3.1", date = "Nov 1, 2026", title = "Half-Hour Dungeon Train Clock", items = {
         { "🕒", "Checks at :00 and :30", "A real in-game clock watcher marks Dungeon Train refreshes at every half-hour boundary.", "NEW" },
         { "🔁", "Late-refresh retry window", "After a boundary, Smart Farm rechecks the active challenge IDs for up to 75 seconds in case CKD rotates a little late.", "NEW" },
@@ -3907,6 +3912,37 @@ function MT.sendWaveStart(reason)
     return res or { ok = true }, nil
 end
 
+function MT.firstWaveStarted()
+    if MT.over then return true end
+    if (tonumber(MT.wave) or 0) > 1 then return true end
+    if (tonumber(MT.enemies) or 0) > 0 then return true end
+    if (tonumber(MT.waveSpawned) or 0) > 0 then return true end
+
+    -- A real wave event sets MT.running=true and waveStartAt. Sync can be slightly ahead/behind,
+    -- so require one of the stronger signs above before declaring the first wave started.
+    return MT.running == true and MT.waveStartAt ~= nil
+end
+
+function MT.tryStartFirstWave(now, reason)
+    if not CFG.autoStart or MT.over or MT.firstWaveStarted() then return false end
+    now = tonumber(now) or U.now()
+
+    local retry = 0.25
+    if now - (MT.lastFirstWaveStartAt or 0) < retry then return false end
+    MT.lastFirstWaveStartAt = now
+
+    local res, err = MT.sendWaveStart(reason or "first-wave watchdog")
+    if res and (type(res) ~= "table" or res.ok ~= false) then
+        SF.status("Waves", "▶ START WAVE 1 sent · waiting for wave event")
+        return true
+    end
+
+    if err and err ~= "busy" and err ~= "not ready" then
+        SF.log(2, "WAVES", "first-wave watchdog retry: " .. tostring(err))
+    end
+    return false
+end
+
 function MT.tryInstantSkip(now, reason)
     if not (CFG.instantSkip and MT.running) or MT.over then return false end
     if not MT.infinite and MT.waves and MT.wave >= MT.waves then return false end
@@ -4322,6 +4358,7 @@ end
 function MT.resetRun()
     MT.runLeaks, MT.earlyCalls, MT.runReach, MT.waveReach = 0, 0, 0, 0
     MT.lastSkipAttemptAt, MT.skipLoggedWave, MT.skipBusy = 0, nil, false
+    MT.lastFirstWaveStartAt = 0
     MT._waveActRemote = nil
     MT.paceSum, MT.paceN, MT.paceLast, MT.paceAt = 0, 0, nil, 0
     MT.cdSum, MT.cdN, MT.spanSum, MT.spanN, MT.cdDue, MT.cdStartAt, MT.spanRaw = 0, 0, 0, 0, nil, nil, {}
@@ -4826,7 +4863,10 @@ function MT.finish()
     -- Dungeon Train challenges are relaunched through the hub every time. Act("again") can return ok while
     -- losing the challenge id, which turns the next run into a normal stage. Returning to the Train is a
     -- little slower but preserves the exact challenge id and lets challengesAt(os.time()) see refreshed cars.
-    if CFG.normalLoop and pick and pick.manual and not MT.raid and not MT.tourney and not MT.portal then
+    if CFG.normalLoop and pick and pick.challenge and pick.challengeFirst and not MT.raid and not MT.tourney and not MT.portal then
+        action = "home"
+        why = "Dungeon Train FIRST WIN priority · switching from Normal Grind to car " .. tostring(pick.challengeSlot or "?")
+    elseif CFG.normalLoop and pick and pick.manual and not MT.raid and not MT.tourney and not MT.portal then
         if pick.infinite then
             action = "home"
             why = "Selected Stage Loop · relaunching the chosen world Infinite"
@@ -5409,6 +5449,16 @@ function MT.run()
         end
     end)
 
+    -- Auto Start watchdog is standalone from Battle AI / Speed Clear. This prevents START WAVE 1 deadlocks.
+    task.spawn(function()
+        while SF.alive and SF.where == "match" and not MT.over do
+            if CFG.autoStart and not MT.firstWaveStarted() then
+                pcall(MT.tryStartFirstWave, U.now(), "standalone first-wave watchdog")
+            end
+            task.wait(0.20)
+        end
+    end)
+
     -- Dedicated reliability worker: does not depend on the 0.25s economy/battle loop.
     task.spawn(function()
         while SF.alive and SF.where == "match" and not MT.over do
@@ -5449,12 +5499,9 @@ function MT.run()
                     if not okTarget then SF.log(1, "SPEED", "targeting: " .. tostring(errTarget)) end
                 end
 
-                if CFG.autoStart and not MT.running and MT.enemies == 0 and U.count(MT.towers) > 0 and now - lastStart >= 0.12 then
+                if CFG.autoStart and now - lastStart >= 0.10 then
                     lastStart = now
-                    local _, errStart = MT.sendWaveStart("speed clear first wave")
-                    if errStart and errStart ~= "busy" and errStart ~= "not ready" then
-                        SF.log(2, "SPEED", "first-wave retry: " .. tostring(errStart))
-                    end
+                    pcall(MT.tryStartFirstWave, now, "speed clear watchdog")
                 end
             end
             task.wait(0.05)
@@ -5568,17 +5615,10 @@ function MT.run()
                     pcall(MT.retarget)
                 end
 
-                local startDelay = CFG.instantSkip and 0.12 or 3
-                if CFG.autoStart and not MT.running and MT.enemies == 0 and U.count(MT.towers) > 0 and t - lastStart > startDelay then
+                local startDelay = CFG.instantSkip and 0.25 or 0.50
+                if CFG.autoStart and t - lastStart > startDelay then
                     lastStart = t
-                    if CFG.instantSkip then
-                        local _, errStart = MT.sendWaveStart("first wave")
-                        if errStart and errStart ~= "busy" and errStart ~= "not ready" then
-                            SF.log(2, "WAVES", "first-wave retry: " .. tostring(errStart))
-                        end
-                    else
-                        SF.request("Act:start", C.R("Act"), "start")
-                    end
+                    pcall(MT.tryStartFirstWave, t, "normal watchdog")
                 end
 
                 if t - lastAb > 1 then
