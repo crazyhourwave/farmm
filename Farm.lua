@@ -1,5 +1,5 @@
 --[[
-    🍬 Candy Kingdom Defense — Smart Farm v2.1.2  (NexusLib)
+    🍬 Candy Kingdom Defense — Smart Farm v2.1.3  (NexusLib)
 
     One script for both places of the game:
       • Lobby (Tree Fort):  rewards → feed → traits/stats → summon → pick the best mode → launch
@@ -13,10 +13,15 @@
 
 -- claim the "running" slot synchronously, before any yield, so two queued loaders can't both start
 if _G.CKD_SF and _G.CKD_SF.alive then return end
-local VERSION = "2.1.2"
+local VERSION = "2.1.3"
 -- what changed, newest first (Updates tab; a one-time notice when a player first runs a new version)
 -- items: { icon, title, text, tag = NEW | IMPROVED | FIX }
 local CHANGELOG = {
+    { v = "2.1.3", date = "Nov 1, 2026", title = "Fully Paced Raid Continue", items = {
+        { "⏱️", "Pause before YES", "After the Bug Milk pour is accepted, Smart Farm waits before confirming PLAY AGAIN.", "FIX" },
+        { "✅", "Wait for confirmation to close", "After YES, the script waits for the PLAY AGAIN popup to disappear before checking for the next raid.", "FIX" },
+        { "🎃", "Pause before next-run detection", "Adds a short settle period before polling the new raid state so the server/UI can reset cleanly.", "IMPROVED" },
+    } },
     { v = "2.1.2", date = "Nov 1, 2026", title = "Raid Pour Cooldown Handling", items = {
         { "🥛", "Slower Bug Milk pour", "Waits briefly after NEXT before pressing POUR 1 BUG MILK so the game has time to arm the item screen.", "FIX" },
         { "⏳", "Slow-down retry", "Detects the red 'Whoa, slow down a little!' warning and retries the pour after a short backoff.", "FIX" },
@@ -4527,20 +4532,33 @@ function MT.autoContinueRaid()
         return false, "POUR 1 BUG MILK failed: " .. tostring(pourWhy)
     end
 
-    -- PLAY AGAIN should already be open if the pour was accepted.
-    task.wait(0.35)
+    -- The pour helper only returns after the PLAY AGAIN confirmation exists.
+    -- Give the accepted pour a moment to settle before confirming it.
+    SF.status("Raid", "🥛 Bug Milk accepted · pausing before YES")
+    task.wait(1.00)
+
     SF.status("Raid", "auto continue · waiting for PLAY AGAIN? → YES")
     if not MT.waitPressRaidPlayAgainYes(10) then
         return false, "PLAY AGAIN YES confirmation not found"
     end
 
-    SF.status("Raid", "✅ PLAY AGAIN confirmed · waiting for next raid")
-    SF.log(1, "RAID", "auto continue: NEXT → POUR 1 BUG MILK → YES")
+    -- Do not immediately poll/start the next step. Wait until the confirmation actually closes.
+    SF.status("Raid", "✅ YES pressed · waiting for confirmation to close")
+    local closeDeadline = U.now() + 4
+    while SF.alive and U.now() < closeDeadline do
+        if not MT.findRaidPlayAgainYes() then break end
+        task.wait(0.15)
+    end
+
+    -- Let the server apply the Bug Milk payment and reset the raid state before resyncing.
+    SF.status("Raid", "🎃 confirmation accepted · preparing next raid")
+    task.wait(1.20)
+    SF.log(1, "RAID", "auto continue: NEXT → POUR 1 BUG MILK → accepted → YES → settled")
 
     -- Wait for the server to reset/start the next raid. Do not require Smart Farm or Auto Play.
     local deadline = U.now() + 20
     while SF.alive and U.now() < deadline do
-        task.wait(0.25)
+        task.wait(0.40)
         pcall(MT.resync)
         if not MT.over then
             MT.runStart = os.time()
