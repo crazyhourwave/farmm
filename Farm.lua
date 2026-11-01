@@ -1,5 +1,5 @@
 --[[
-    🍬 Candy Kingdom Defense — Smart Farm v2.1.1  (NexusLib)
+    🍬 Candy Kingdom Defense — Smart Farm v2.1.2  (NexusLib)
 
     One script for both places of the game:
       • Lobby (Tree Fort):  rewards → feed → traits/stats → summon → pick the best mode → launch
@@ -13,10 +13,15 @@
 
 -- claim the "running" slot synchronously, before any yield, so two queued loaders can't both start
 if _G.CKD_SF and _G.CKD_SF.alive then return end
-local VERSION = "2.1.1"
+local VERSION = "2.1.2"
 -- what changed, newest first (Updates tab; a one-time notice when a player first runs a new version)
 -- items: { icon, title, text, tag = NEW | IMPROVED | FIX }
 local CHANGELOG = {
+    { v = "2.1.2", date = "Nov 1, 2026", title = "Raid Pour Cooldown Handling", items = {
+        { "🥛", "Slower Bug Milk pour", "Waits briefly after NEXT before pressing POUR 1 BUG MILK so the game has time to arm the item screen.", "FIX" },
+        { "⏳", "Slow-down retry", "Detects the red 'Whoa, slow down a little!' warning and retries the pour after a short backoff.", "FIX" },
+        { "✅", "Confirmation-aware pour", "The script only moves on to YES after the PLAY AGAIN confirmation actually appears.", "IMPROVED" },
+    } },
     { v = "2.1.1", date = "Oct 31, 2026", title = "Halloween Raid YES Confirmation", items = {
         { "✅", "PLAY AGAIN? confirmation", "Auto Continue now presses YES after POUR 1 BUG MILK before waiting for the next raid.", "FIX" },
         { "🎯", "Scoped YES detection", "It only presses YES inside a visible PLAY AGAIN / Bug Milk confirmation popup.", "FIX" },
@@ -4391,6 +4396,64 @@ function MT.waitPressRaidButton(words, timeout, label)
     return false
 end
 
+function MT.raidSlowDownVisible()
+    local pg = LP:FindFirstChildOfClass("PlayerGui")
+    if not pg then return false end
+    for _, obj in ipairs(pg:GetDescendants()) do
+        if (obj:IsA("TextLabel") or obj:IsA("TextButton")) and raidGuiVisible(obj) then
+            local t = raidTextNorm(obj.Text)
+            if t:find("WHOASLOWDOWNALITTLE", 1, true) or t:find("SLOWDOWNALITTLE", 1, true) then
+                return true
+            end
+        end
+    end
+    return false
+end
+
+function MT.pressRaidPourSafely(timeout)
+    local untilAt = U.now() + (tonumber(timeout) or 12)
+    local attempts = 0
+
+    while SF.alive and U.now() < untilAt do
+        -- If the game is explicitly rate-limiting us, don't spam the button.
+        if MT.raidSlowDownVisible() then
+            SF.status("Raid", "🥛 game says slow down · waiting…")
+            task.wait(0.75)
+            continue
+        end
+
+        local yes = MT.findRaidPlayAgainYes and MT.findRaidPlayAgainYes()
+        if yes then return true, "confirmation already open" end
+
+        local btn = MT.findRaidButton({ "POUR 1 BUG MILK", "POUR1BUGMILK" })
+        if btn then
+            attempts += 1
+            SF.status("Raid", "auto continue · pouring Bug Milk")
+            local ok, how = MT.activateRaidButton(btn)
+            if ok then
+                SF.log(1, "RAID", "pour attempt " .. tostring(attempts) .. " via " .. tostring(how))
+                -- Give the server/UI time to either accept and open PLAY AGAIN, or show its cooldown warning.
+                local checkUntil = U.now() + 1.0
+                while SF.alive and U.now() < checkUntil do
+                    if MT.findRaidPlayAgainYes and MT.findRaidPlayAgainYes() then
+                        return true, "accepted"
+                    end
+                    if MT.raidSlowDownVisible() then
+                        SF.log(1, "RAID", "pour was rate-limited; backing off before retry")
+                        task.wait(0.9)
+                        break
+                    end
+                    task.wait(0.10)
+                end
+            end
+        end
+
+        task.wait(0.35)
+    end
+
+    return false, "pour was never accepted"
+end
+
 function MT.findRaidPlayAgainYes()
     local pg = LP:FindFirstChildOfClass("PlayerGui")
     if not pg then return nil end
@@ -4454,14 +4517,18 @@ function MT.autoContinueRaid()
         return false, "NEXT button not found"
     end
 
-    -- NEXT opens the YOUR ITEMS dialog shown in the raid result flow.
-    task.wait(0.2)
+    -- NEXT opens YOUR ITEMS. The game rate-limits pouring if this is clicked immediately.
+    SF.status("Raid", "auto continue · letting Bug Milk screen settle")
+    task.wait(1.30)
+
     SF.status("Raid", "auto continue · waiting for POUR 1 BUG MILK")
-    if not MT.waitPressRaidButton({ "POUR 1 BUG MILK", "POUR1BUGMILK" }, 10, "POUR 1 BUG MILK") then
-        return false, "POUR 1 BUG MILK button not found (out of milk or UI changed)"
+    local poured, pourWhy = MT.pressRaidPourSafely(14)
+    if not poured then
+        return false, "POUR 1 BUG MILK failed: " .. tostring(pourWhy)
     end
 
-    task.wait(0.15)
+    -- PLAY AGAIN should already be open if the pour was accepted.
+    task.wait(0.35)
     SF.status("Raid", "auto continue · waiting for PLAY AGAIN? → YES")
     if not MT.waitPressRaidPlayAgainYes(10) then
         return false, "PLAY AGAIN YES confirmation not found"
