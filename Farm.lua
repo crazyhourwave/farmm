@@ -1,5 +1,5 @@
 --[[
-    🍬 Candy Kingdom Defense — Smart Farm v2.3.3  (NexusLib)
+    🍬 Candy Kingdom Defense — Smart Farm v2.3.4  (NexusLib)
 
     One script for both places of the game:
       • Lobby (Tree Fort):  rewards → feed → traits/stats → summon → pick the best mode → launch
@@ -12,7 +12,7 @@
 ]]
 
 -- Claim the running slot synchronously. A newer build replaces an older live copy instead of silently returning.
-local VERSION = "2.3.3"
+local VERSION = "2.3.4"
 do
     local old = _G.CKD_SF
     if old and old.alive then
@@ -30,6 +30,12 @@ end
 -- what changed, newest first (Updates tab; a one-time notice when a player first runs a new version)
 -- items: { icon, title, text, tag = NEW | IMPROVED | FIX }
 local CHANGELOG = {
+    { v = "2.3.4", date = "Nov 1, 2026", title = "Recover Current Dungeon Train Cycle", items = {
+        { "🕞", "3:30 cycle recovery", "Loading/reloading shortly after :00 or :30 now recognizes the already-refreshed current Train instead of waiting another 30 minutes.", "FIX" },
+        { "🚂", "Current challenge IDs win", "If the current half-hour's challenge set is unclaimed, FIRST WIN priority activates immediately.", "FIX" },
+        { "⏳", "No 3:27 false trigger", "Late in a cycle (for example 3:27), startup still waits for the upcoming :30 refresh instead of farming the old set early.", "FIX" },
+        { "🧭", "Cycle diagnostics", "Train logs now identify whether a refresh was observed live or recovered after a reload.", "IMPROVED" },
+    } },
     { v = "2.3.3", date = "Nov 1, 2026", title = "Strict Half-Hour Train Gate", items = {
         { "🕒", "No early lobby returns", "FIRST WIN priority cannot interrupt Normal Grind before a real :00 / :30 boundary.", "FIX" },
         { "🔄", "Requires an actual Train rotation", "At the boundary, Smart Farm waits for the Dungeon Train challenge IDs to change before marking FIRST WIN work due.", "FIX" },
@@ -1592,6 +1598,14 @@ function C.MODE.challengeClockCheck(prof, force, reason)
     -- A forced check at script/teleport startup is a baseline, NOT permission to leave the current grind.
     -- Only preserve an already-active refresh session from this same half-hour bucket.
     if force then
+        local bucketStartedAt = bucket * 1800
+        local sinceBoundary = math.max(0, now - bucketStartedAt)
+        local nearBoundary = sinceBoundary <= 10 * 60
+        local enteredNewBucket = oldBucket ~= nil and oldBucket ~= bucket
+        local recoveredCurrentCycle = #firsts > 0
+            and CFG.challenges and CFG.challengeFirstPriority
+            and (enteredNewBucket or sigChanged or nearBoundary)
+
         if dueThisBucket then
             if #firsts == 0 then
                 B.challengeRefreshDue = false
@@ -1599,8 +1613,17 @@ function C.MODE.challengeClockCheck(prof, force, reason)
                 B.challengeClockRetryUntil = 0
                 SF.log(1, "TRAIN", "all FIRST WIN cars from this refresh are complete → Normal Grind resumes")
             end
+        elseif recoveredCurrentCycle then
+            -- Example: the loader starts at 3:32 after the 3:30 Train already rotated.
+            -- The current challenge IDs + unclaimed FIRST WINs belong to this half-hour cycle, so claim them now.
+            B.challengeRefreshDue = true
+            B.challengeDueBucket = bucket
+            B.challengeClockRetryUntil = 0
+            SF.log(1, "TRAIN", string.format(
+                "recovered current %s Train cycle · %d FIRST WIN car%s ready · %ds after boundary",
+                C.MODE.challengeLocalTime(bucketStartedAt), #firsts, #firsts == 1 and "" or "s", sinceBoundary
+            ))
         elseif crossedDuringTeleport then
-            -- If teleport straddled :00/:30 by only a few seconds, treat it like a live boundary observation.
             B.challengeClockRetryUntil = now + 75
             if sigChanged and #firsts > 0 and CFG.challenges and CFG.challengeFirstPriority then
                 B.challengeRefreshDue = true
@@ -1612,8 +1635,8 @@ function C.MODE.challengeClockCheck(prof, force, reason)
                 B.challengeDueBucket = nil
             end
         else
-            -- Starting/reloading at 3:27, 4:12, etc. merely records the current Train.
-            -- It must wait for the NEXT :00/:30 boundary.
+            -- Late in the current cycle (3:27, 4:22, etc.), do not treat leftover FIRST WINs as a new refresh.
+            -- Wait for the upcoming :00/:30 boundary.
             B.challengeRefreshDue = false
             B.challengeDueBucket = nil
             B.challengeClockRetryUntil = 0
@@ -1626,7 +1649,7 @@ function C.MODE.challengeClockCheck(prof, force, reason)
         B.challengeClockNextAt = C.MODE.challengeNextClockAt(now)
         B.challengeClockFirst = #firsts
         SF.saveSoon()
-        return #firsts, false
+        return #firsts, recoveredCurrentCycle
     end
 
     if boundaryChanged then
@@ -6714,7 +6737,9 @@ function GUI.updateTabs()
                 return string.format(
                     "%s · %s · next check %s · %dm %02ds",
                     modeName or "Challenge mode",
-                    (B.challengeRefreshDue and "🏆 refresh ACTIVE" or "⏳ waiting for :00 / :30"),
+                    (B.challengeRefreshDue
+                        and ("🏆 current " .. C.MODE.challengeLocalTime(C.MODE.challengeClockBucket(os.time()) * 1800) .. " cycle ACTIVE")
+                        or "⏳ waiting for :00 / :30"),
                     C.MODE.challengeLocalTime(nextCheck),
                     math.floor(left / 60), left % 60
                 )
