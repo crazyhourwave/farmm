@@ -13,10 +13,16 @@
 
 -- claim the "running" slot synchronously, before any yield, so two queued loaders can't both start
 if _G.CKD_SF and _G.CKD_SF.alive then return end
-local VERSION = "2.3.0"
+local VERSION = "2.3.1"
 -- what changed, newest first (Updates tab; a one-time notice when a player first runs a new version)
 -- items: { icon, title, text, tag = NEW | IMPROVED | FIX }
 local CHANGELOG = {
+    { v = "2.3.1", date = "Nov 1, 2026", title = "Half-Hour Dungeon Train Clock", items = {
+        { "🕒", "Checks at :00 and :30", "A real in-game clock watcher marks Dungeon Train refreshes at every half-hour boundary.", "NEW" },
+        { "🔁", "Late-refresh retry window", "After a boundary, Smart Farm rechecks the active challenge IDs for up to 75 seconds in case CKD rotates a little late.", "NEW" },
+        { "♾️", "Infinite can be interrupted", "If fresh FIRST WIN cars appear while Normal Grind is Infinite, Smart Farm returns to the lobby to claim them.", "NEW" },
+        { "📟", "Next check shown in UI", "The Dungeon Train card displays the next local half-hour check and a live countdown.", "NEW" },
+    } },
     { v = "2.3.0", date = "Nov 1, 2026", title = "Dungeon Train First-Win Priority", items = {
         { "🏆", "Auto First-Win Bonuses", "Unclaimed Dungeon Train FIRST WIN cars temporarily interrupt Normal Grind, then hand control straight back.", "NEW" },
         { "🔄", "Refresh-driven checks", "The planner reads the game's active challenge cars every route check instead of depending on a guessed 30-minute timer.", "NEW" },
@@ -498,6 +504,14 @@ do
     B.raidAggrReset = b.raidAggrReset                                        -- raid early-call boldness re-learned once
     B.lastResult = type(b.lastResult) == "table" and b.lastResult or nil   -- last run's result line (GUI)
     B.challengeLast = b.challengeLast                         -- last Dungeon Train challenge id launched (round-robin cursor)
+    B.challengeClockBucket = tonumber(b.challengeClockBucket)
+    B.challengeClockSig = type(b.challengeClockSig) == "string" and b.challengeClockSig or nil
+    B.challengeClockCheckedAt = tonumber(b.challengeClockCheckedAt) or 0
+    B.challengeClockNextAt = tonumber(b.challengeClockNextAt) or 0
+    B.challengeClockRetryUntil = tonumber(b.challengeClockRetryUntil) or 0
+    B.challengeClockLastProbe = tonumber(b.challengeClockLastProbe) or 0
+    B.challengeClockFirst = tonumber(b.challengeClockFirst) or 0
+    B.challengeRefreshDue = b.challengeRefreshDue == true
     B.lastReport = tonumber(b.lastReport) or 0                              -- last anonymous stats report (opt-in)
     B.powerHub = b.powerHub == true
     B.traitLog = type(b.traitLog) == "table" and b.traitLog or nil         -- trait chases {at, clock, kind, goal, rolls, spent, from, to, hit}
@@ -1476,6 +1490,107 @@ function C.MODE.describe(m)
         or (m.challenge and (m.challengeFirst and "challenge · FIRST WIN" or "challenge · repeat")
         or (m.infinite and "infinite" or (m.first and "first clear" or "farm")))
     return string.format("%s [%s] win %.0f%% · %.0f gem-eq/min", name, tag, (m.p or 0) * 100, m.value or 0)
+end
+
+-- Dungeon Train clock: the visible train rotates on half-hour boundaries (:00 / :30).
+-- Epoch / 1800 gives the same half-hour boundaries regardless of timezone; display uses the player's local clock.
+function C.MODE.challengeClockBucket(at)
+    return math.floor((tonumber(at) or os.time()) / 1800)
+end
+
+function C.MODE.challengeNextClockAt(at)
+    local now = tonumber(at) or os.time()
+    return (C.MODE.challengeClockBucket(now) + 1) * 1800
+end
+
+function C.MODE.challengeLocalTime(at)
+    at = tonumber(at) or os.time()
+    local ok, dt = pcall(function()
+        return DateTime.fromUnixTimestamp(at):ToLocalTime()
+    end)
+    if ok and dt then
+        local h = tonumber(dt.Hour) or 0
+        local ap = h >= 12 and "PM" or "AM"
+        h = h % 12
+        if h == 0 then h = 12 end
+        return string.format("%d:%02d %s", h, tonumber(dt.Minute) or 0, ap)
+    end
+    return os.date("%H:%M", at)
+end
+
+function C.MODE.challengeSnapshot(prof, at)
+    prof = prof or B.prof or {}
+    local ok, chs = pcall(C.Catalog.challengesAt, tonumber(at) or os.time())
+    chs = ok and type(chs) == "table" and chs or {}
+    local ids, firsts = {}, {}
+
+    for slot, ch in ipairs(chs) do
+        ids[#ids + 1] = tostring(ch.id)
+        if C.Catalog.unlocked(prof, ch.stage) then
+            local okW, won = pcall(C.Catalog.challengeWon, prof, ch.id)
+            if not (okW and won == true) then
+                firsts[#firsts + 1] = { id = ch.id, stage = ch.stage, slot = slot }
+            end
+        end
+    end
+
+    table.sort(ids)
+    return table.concat(ids, "|"), firsts, chs
+end
+
+function C.MODE.challengeClockCheck(prof, force, reason)
+    local now = os.time()
+    local bucket = C.MODE.challengeClockBucket(now)
+    local boundaryChanged = B.challengeClockBucket ~= nil and B.challengeClockBucket ~= bucket
+    local shouldProbe = force or B.challengeClockBucket == nil or boundaryChanged
+        or (now < (tonumber(B.challengeClockRetryUntil) or 0)
+            and now - (tonumber(B.challengeClockLastProbe) or 0) >= 5)
+
+    if not shouldProbe then
+        return tonumber(B.challengeClockFirst) or 0, false
+    end
+
+    local oldSig = B.challengeClockSig
+    local sig, firsts = C.MODE.challengeSnapshot(prof, now)
+    local sigChanged = oldSig ~= nil and sig ~= oldSig
+
+    B.challengeClockBucket = bucket
+    B.challengeClockSig = sig
+    B.challengeClockCheckedAt = now
+    B.challengeClockLastProbe = now
+    B.challengeClockNextAt = C.MODE.challengeNextClockAt(now)
+    B.challengeClockFirst = #firsts
+
+    if boundaryChanged then
+        -- Keep probing after :00/:30 so a slightly-late server rotation is still caught.
+        B.challengeClockRetryUntil = now + 75
+        SF.log(1, "TRAIN", string.format(
+            "half-hour check %s · %d FIRST WIN car%s visible",
+            C.MODE.challengeLocalTime(now), #firsts, #firsts == 1 and "" or "s"
+        ))
+    elseif sigChanged then
+        B.challengeClockRetryUntil = 0
+        SF.log(1, "TRAIN", string.format(
+            "Dungeon Train cars refreshed · %d FIRST WIN car%s ready",
+            #firsts, #firsts == 1 and "" or "s"
+        ))
+    end
+
+    if #firsts > 0 and CFG.challenges and CFG.challengeFirstPriority then
+        B.challengeRefreshDue = true
+    elseif sigChanged or now >= (tonumber(B.challengeClockRetryUntil) or 0) then
+        B.challengeRefreshDue = false
+    end
+
+    SF.saveSoon()
+    return #firsts, sigChanged or boundaryChanged
+end
+
+function C.MODE.challengeClockCountdown()
+    local now = os.time()
+    local nextAt = C.MODE.challengeNextClockAt(now)
+    local left = math.max(0, nextAt - now)
+    return nextAt, left
 end
 
 -- ============================================================
@@ -3191,7 +3306,10 @@ function HUB.play()
             manual = m.manual, manualWorld = m.manualWorld, manualAct = m.manualAct,
             diff = m.diff, power = m.power, at = os.time(),
         }
-        if m.challenge then B.challengeLast = m.challenge end
+        if m.challenge then
+            B.challengeLast = m.challenge
+            B.challengeRefreshDue = false
+        end
         B.sinceHub = 0
         SF.saveNow()
         SF.status("Mode", "teleporting · " .. C.MODE.describe(m))
@@ -5271,6 +5389,26 @@ function MT.run()
     MT.initMap()
     MT.resetRun()
 
+    -- Half-hour Dungeon Train watcher. Finite matches finish normally; Infinite may be interrupted
+    -- when fresh FIRST WIN cars appear so a long endless run cannot hide an entire refresh cycle.
+    task.spawn(function()
+        pcall(C.MODE.challengeClockCheck, B.prof, true, "match start")
+        while SF.alive and SF.where == "match" and not MT.over do
+            if CFG.challenges and CFG.challengeFirstPriority then
+                local okClock, firsts = pcall(C.MODE.challengeClockCheck, B.prof, false, "match clock")
+                if okClock and tonumber(firsts) and firsts > 0 and B.challengeRefreshDue
+                    and CFG.master and CFG.play and MT.infinite and not MT.raid and not MT.tourney and not MT.portal then
+                    SF.status("Mode", "🏆 FIRST WIN refresh detected · leaving Infinite")
+                    SF.log(1, "TRAIN", "fresh FIRST WIN cars detected during Infinite → returning to lobby")
+                    SF.flush()
+                    SF.request("ReturnToHub", C.R("ReturnToHub"))
+                    return
+                end
+            end
+            task.wait(1)
+        end
+    end)
+
     -- Dedicated reliability worker: does not depend on the 0.25s economy/battle loop.
     task.spawn(function()
         while SF.alive and SF.where == "match" and not MT.over do
@@ -5488,9 +5626,18 @@ function HUB.run()
         end))
     end
     HUB.refresh(true)
+    pcall(C.MODE.challengeClockCheck, HUB.prof, true, "hub start")
     local nextAt = {}
     local settleAt = U.now() + 1.5 -- every lobby second is dead time between maps: launch as soon as chores are done
     while SF.alive and SF.where == "hub" do
+        if CFG.challenges and CFG.challengeFirstPriority then
+            local beforeBucket = B.challengeClockBucket
+            local okClock, firsts, changed = pcall(C.MODE.challengeClockCheck, HUB.prof, false, "hub clock")
+            if okClock and (changed or (beforeBucket ~= B.challengeClockBucket)) then
+                -- Re-run Mode immediately after a boundary/rotation instead of waiting for its normal 4s slot.
+                nextAt.Mode = 0
+            end
+        end
         -- after a launch nothing else may run (a team change during the teleport would undo the raid team)
         if CFG.master and not HUB.launched then
             local didWork = false
@@ -6076,7 +6223,7 @@ function GUI.build()
 
     T:Section("DUNGEON TRAIN")
     tog(T, "Challenges", "Use the current Dungeon Train cars", "challenges")
-    tog(T, "🏆 Auto First-Win Bonuses", "When a refreshed FIRST WIN appears, pause Normal Grind, clear all unclaimed cars, then resume Normal Grind", "challengeFirstPriority")
+    tog(T, "🏆 Auto First-Win Bonuses", "Checks every :00 / :30; refreshed FIRST WIN cars pause Normal Grind, then Normal Grind resumes", "challengeFirstPriority")
     UI.challengeMode = T:Dropdown("Challenge Behavior", "First wins only · keep repeats available · or endlessly rotate every active Dungeon Train car",
         { "First wins only", "Keep farming", "Endless challenge loop" }, tonumber(CFG.challengeMode) or 3, function(_, _, i)
             setCfg("challengeMode", tonumber(i) or 3)
@@ -6423,7 +6570,15 @@ function GUI.updateTabs()
         pcall(GUI.challengeCard.Set, {
             icon = "🏆", title = title,
             text = #rows > 0 and table.concat(rows, "  •  ") or "Waiting for challenge data",
-            sub = string.format("%s · ★ first-win bonus · ✓ repeat reward", modeName or "Challenge mode"),
+            sub = (function()
+                local nextCheck, left = C.MODE.challengeClockCountdown()
+                return string.format(
+                    "%s · next half-hour check %s · %dm %02ds · ★ first-win · ✓ repeat",
+                    modeName or "Challenge mode",
+                    C.MODE.challengeLocalTime(nextCheck),
+                    math.floor(left / 60), left % 60
+                )
+            end)(),
             tag = tostring(active) .. " cars", tagColor = firstLeft > 0 and COL.gold or COL.purple,
             progress = active > 0 and (active - firstLeft) / active or false,
             color = firstLeft > 0 and COL.gold or COL.purple,
