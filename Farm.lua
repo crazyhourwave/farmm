@@ -1,5 +1,5 @@
 --[[
-    🍬 Candy Kingdom Defense — Smart Farm v2.3.8  (NexusLib)
+    🍬 Candy Kingdom Defense — Smart Farm v2.3.9  (NexusLib)
 
     One script for both places of the game:
       • Lobby (Tree Fort):  rewards → feed → traits/stats → summon → pick the best mode → launch
@@ -12,7 +12,7 @@
 ]]
 
 -- Claim the running slot synchronously. A newer build replaces an older live copy instead of silently returning.
-local VERSION = "2.3.8"
+local VERSION = "2.3.9"
 do
     local old = _G.CKD_SF
     if old and old.alive then
@@ -30,6 +30,11 @@ end
 -- what changed, newest first (Updates tab; a one-time notice when a player first runs a new version)
 -- items: { icon, title, text, tag = NEW | IMPROVED | FIX }
 local CHANGELOG = {
+    { v = "2.3.9", date = "Nov 1, 2026", title = "Hard START WAVE Override", items = {
+        { "▶️", "Visible button overrides running=true", "If CKD still shows START WAVE 1, that visible button now wins over stale Sync running state.", "FIX" },
+        { "🖱️", "Click happens before state gating", "Smart Farm checks and presses START WAVE before asking whether the first wave already started.", "FIX" },
+        { "🧯", "No false skip of Auto Start", "The first-wave watchdog cannot exit early just because the server reports running=true during the pre-wave countdown.", "FIX" },
+    } },
     { v = "2.3.8", date = "Nov 1, 2026", title = "Visible START WAVE Recovery", items = {
         { "▶️", "Clicks the real START WAVE button", "When Wave 1 is waiting, Smart Farm now presses the visible in-game START WAVE button directly before falling back to the Act remote.", "FIX" },
         { "🧠", "No false started state from enemy snapshots", "A stale or preloaded enemy/spawn snapshot can no longer convince the first-wave watchdog that Wave 1 already began.", "FIX" },
@@ -4170,58 +4175,83 @@ function MT.sendWaveStart(reason)
     return res or { ok = true }, nil
 end
 
+function MT.visibleStartWaveButton()
+    if type(MT.findRaidButton) ~= "function" then return nil end
+    local ok, btn = pcall(MT.findRaidButton, { "START WAVE" })
+    if ok and btn and btn.Parent then return btn end
+    return nil
+end
+
 function MT.firstWaveStarted()
     if MT.over then return true end
     if (tonumber(MT.wave) or 0) > 1 then return true end
     if MT.roundWaveSeen == true then return true end
-    -- Sync can briefly expose stale/preloaded enemy data while CKD is still showing START WAVE 1.
-    -- Only the authoritative running state / real wave event is allowed to mark Wave 1 as started.
+
+    -- IMPORTANT: CKD can report running=true while the pre-wave START WAVE 1 button is still visible.
+    -- A visible START WAVE button is authoritative: Wave 1 has NOT actually started yet.
+    if MT.visibleStartWaveButton() then return false end
+
     if MT.running == true then return true end
     return false
 end
 
 function MT.tryStartFirstWave(now, reason)
-    if not CFG.autoStart or MT.over or MT.firstWaveStarted() then return false end
+    if not CFG.autoStart or MT.over then return false end
     now = tonumber(now) or U.now()
 
-    local retry = 0.25
+    local retry = 0.20
     if now - (MT.lastFirstWaveStartAt or 0) < retry then return false end
     MT.lastFirstWaveStartAt = now
 
-    -- The game's visible START WAVE button is the most authoritative sign that Wave 1 is still waiting.
-    -- Click it exactly like the player would. This fixes post-Challenge handoffs where the Act remote can
-    -- answer without actually dismissing START WAVE 1.
-    if type(MT.findRaidButton) == "function" then
-        local okFind, btn = pcall(MT.findRaidButton, { "START WAVE" })
-        if okFind and btn and btn.Parent then
-            local clicked, how = false, nil
+    -- Check the visible UI BEFORE firstWaveStarted(). CKD may report running=true too early.
+    local btn = MT.visibleStartWaveButton()
+    if btn then
+        local clicked, how = false, nil
+
+        -- Prefer the same direct UI activation helper already used by Raid Continue.
+        if type(MT.activateRaidButton) == "function" then
+            local okAct, didClick, method = pcall(MT.activateRaidButton, btn)
+            if okAct and didClick then
+                clicked, how = true, method
+            end
+        end
+
+        -- Extra hard fallback: click the center of the visible START WAVE button.
+        if not clicked then
             local okV, vim = pcall(game.GetService, game, "VirtualInputManager")
             if okV and vim then
                 local p = btn.AbsolutePosition + btn.AbsoluteSize / 2
                 local okClick = pcall(function()
                     vim:SendMouseButtonEvent(p.X, p.Y, 0, true, game, 0)
-                    task.wait(0.04)
+                    task.wait(0.05)
                     vim:SendMouseButtonEvent(p.X, p.Y, 0, false, game, 0)
                 end)
-                if okClick then clicked, how = true, "visible button" end
-            end
-            if not clicked and type(MT.activateRaidButton) == "function" then
-                local okAct, didClick, method = pcall(MT.activateRaidButton, btn)
-                if okAct and didClick then clicked, how = true, method end
-            end
-            if clicked then
-                if now - (MT.lastFirstWaveUiLogAt or 0) > 1.5 then
-                    MT.lastFirstWaveUiLogAt = now
-                    SF.log(1, "WAVES", "AUTO START pressed visible START WAVE via " .. tostring(how))
+                if okClick then
+                    clicked, how = true, "virtual mouse"
                 end
-                SF.status("Waves", "▶ AUTO START pressed · waiting for Wave 1")
-                MT.lastFirstWaveSendOkAt = now
-                return true
             end
         end
+
+        if clicked then
+            if now - (MT.lastFirstWaveUiLogAt or 0) > 1 then
+                MT.lastFirstWaveUiLogAt = now
+                SF.log(1, "WAVES", "AUTO START pressed visible START WAVE via " .. tostring(how))
+            end
+            SF.status("Waves", "▶ AUTO START pressed · waiting for Wave 1")
+            MT.lastFirstWaveSendOkAt = now
+            return true
+        end
+
+        -- If the button is visible but UI activation failed, DO NOT trust running=true.
+        -- Fall through to the Act remote as another way to start the same wave.
+        if now - (MT.lastFirstWaveUiFailLogAt or 0) > 2 then
+            MT.lastFirstWaveUiFailLogAt = now
+            SF.log(1, "WAVES", "START WAVE visible but UI activation failed · trying Act remote")
+        end
+    elseif MT.firstWaveStarted() then
+        return false
     end
 
-    -- Fallback for executors / UI states where the button cannot be activated directly.
     local res, err = MT.sendWaveStart(reason or "first-wave watchdog")
     if res and (type(res) ~= "table" or res.ok ~= false) then
         SF.status("Waves", "▶ AUTO START sent · waiting for Wave 1")
