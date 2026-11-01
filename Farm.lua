@@ -13,10 +13,16 @@
 
 -- claim the "running" slot synchronously, before any yield, so two queued loaders can't both start
 if _G.CKD_SF and _G.CKD_SF.alive then return end
-local VERSION = "2.2.0"
+local VERSION = "2.3.0"
 -- what changed, newest first (Updates tab; a one-time notice when a player first runs a new version)
 -- items: { icon, title, text, tag = NEW | IMPROVED | FIX }
 local CHANGELOG = {
+    { v = "2.3.0", date = "Nov 1, 2026", title = "Dungeon Train First-Win Priority", items = {
+        { "🏆", "Auto First-Win Bonuses", "Unclaimed Dungeon Train FIRST WIN cars temporarily interrupt Normal Grind, then hand control straight back.", "NEW" },
+        { "🔄", "Refresh-driven checks", "The planner reads the game's active challenge cars every route check instead of depending on a guessed 30-minute timer.", "NEW" },
+        { "🗺️", "Normal Grind fallback", "When no FIRST WIN bonus is available, your selected normal World/Act/Infinite loop continues exactly as before.", "NEW" },
+        { "🚂", "All available first wins", "If multiple cars are unclaimed, Smart Farm clears them in car order before returning to Normal Grind.", "NEW" },
+    } },
     { v = "2.2.0", date = "Nov 1, 2026", title = "Standalone Speed Clear", items = {
         { "🚀", "Speed Clear Assist", "Accelerates placement, upgrades, abilities, targeting and first-wave start without changing your equipped team.", "NEW" },
         { "💸", "Faster economy", "Affordable placements and upgrades can be acted on about every 0.10s instead of waiting for the normal battle loop.", "IMPROVED" },
@@ -313,6 +319,7 @@ C.DEFAULTS = {
     goal = 1,                  -- 1 Progress (clear maps fast, farm only to break walls) · 2 Gems per minute
     play = true, story = true, farm = true, challenges = true, infinite = false,
     challengeMode = 3,         -- 1 first wins only · 2 keep farming repeats · 3 endless Dungeon Train loop
+    challengeFirstPriority = true, -- FIRST WIN bonuses can interrupt Normal Grind, then Normal Grind resumes
     normalLoop = false,        -- manually selected normal World + Act overrides the planner and replays forever
     normalWorld = 1,           -- index in the playable normal-world list below
     normalAct = 1,             -- act index inside that world
@@ -440,12 +447,13 @@ do
         saved.speedClearAbility = nil
         saved.speedClearTarget = nil
     end
+    if (tonumber(saved.cfgv) or 1) < 15 then saved.challengeFirstPriority = nil end
     -- sharing became on by default: only players who never touched the toggle get the new default
     if saved.shareChosen ~= true then saved.shareStats = nil end
     for k, v in pairs(C.DEFAULTS) do
         if saved[k] ~= nil and type(saved[k]) == type(v) then CFG[k] = saved[k] else CFG[k] = v end
     end
-    CFG.cfgv = 14
+    CFG.cfgv = 15
 end
 SF.saveAt = nil
 function SF.saveSoon() SF.saveAt = U.now() + 1.5 end
@@ -1353,18 +1361,42 @@ function C.MODE.pick(prof)
         C.MODE.challengeLoop = nil
     end
 
-    -- Manual normal replay is the strongest user intent: when enabled, ignore the route ranking and
-    -- play exactly the selected World + Act.  Story/Farm/Challenge toggles do not change this selection.
+    -- Selected Stage Loop is the normal fallback, but refreshed Dungeon Train FIRST WIN bonuses
+    -- may temporarily interrupt it when Auto First-Win Bonuses is enabled.
     if CFG.normalLoop then
-        local manual, note = C.MODE.selectedNormal(prof)
-        C.MODE.normalLoopNote = note
-        if manual then
-            C.MODE.score(manual, prof, power, cap, totalRuns)
-            manual.tier = 99
-            best = manual
+        local firstChallenge
+        if CFG.challenges and CFG.challengeFirstPriority then
+            for _, m in ipairs(scored) do
+                if m.challenge and m.challengeFirst and (m.value or 0) > 0 then
+                    if not firstChallenge
+                        or (tonumber(m.challengeSlot) or 999) < (tonumber(firstChallenge.challengeSlot) or 999) then
+                        firstChallenge = m
+                    end
+                end
+            end
+        end
+
+        if firstChallenge then
+            best = firstChallenge
+            C.MODE.normalLoopNote = string.format(
+                "paused for Dungeon Train FIRST WIN · car %s",
+                tostring(firstChallenge.challengeSlot or "?")
+            )
+            C.MODE.challengeLoop = string.format(
+                "FIRST WIN priority · car %s",
+                tostring(firstChallenge.challengeSlot or "?")
+            )
         else
-            -- Do not silently farm something else when the user explicitly selected a locked/missing act.
-            best = nil
+            local manual, note = C.MODE.selectedNormal(prof)
+            C.MODE.normalLoopNote = note
+            if manual then
+                C.MODE.score(manual, prof, power, cap, totalRuns)
+                manual.tier = 99
+                best = manual
+            else
+                -- Do not silently farm something else when the user explicitly selected a locked/missing act.
+                best = nil
+            end
         end
     else
         C.MODE.normalLoopNote = nil
@@ -1415,7 +1447,7 @@ function C.MODE.purpose(m)
     end
     if m.challenge then
         if m.challengeFirst then
-            return "Dungeon Train first win: claim the extra Trait Crystals + Juice, plus the regular Gems/Page reward"
+            return "Dungeon Train FIRST WIN: claim the bonus, then return to Normal Grind when no unclaimed cars remain"
         end
         return "Dungeon Train repeat: keep farming the regular Gems/Page reward until the cars refresh"
     end
@@ -6044,10 +6076,22 @@ function GUI.build()
 
     T:Section("DUNGEON TRAIN")
     tog(T, "Challenges", "Use the current Dungeon Train cars", "challenges")
+    tog(T, "🏆 Auto First-Win Bonuses", "When a refreshed FIRST WIN appears, pause Normal Grind, clear all unclaimed cars, then resume Normal Grind", "challengeFirstPriority")
     UI.challengeMode = T:Dropdown("Challenge Behavior", "First wins only · keep repeats available · or endlessly rotate every active Dungeon Train car",
         { "First wins only", "Keep farming", "Endless challenge loop" }, tonumber(CFG.challengeMode) or 3, function(_, _, i)
             setCfg("challengeMode", tonumber(i) or 3)
         end)
+    T:Button("🎁", "First Wins + Normal Grind", "Claim every available FIRST WIN bonus, then automatically return to your selected Normal Grind", function()
+        CFG.challenges = true
+        CFG.challengeFirstPriority = true
+        CFG.challengeMode = 1
+        pcall(function() UI.challenges.Set(true, true) end)
+        pcall(function() UI.challengeFirstPriority.Set(true, true) end)
+        pcall(function() UI.challengeMode.Set(1, true) end)
+        SF.saveNow()
+        notify("Dungeon Train", "FIRST WIN priority enabled — Normal Grind stays as the fallback", "success")
+    end)
+
     T:Button("🏆", "Start Endless Challenges", "Rotate all active cars forever; new cars are picked up automatically when the Train refreshes", function()
         CFG.challenges = true; CFG.challengeMode = 3; CFG.normalLoop = false
         pcall(function() UI.challenges.Set(true, true) end)
