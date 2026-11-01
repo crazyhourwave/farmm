@@ -1,5 +1,5 @@
 --[[
-    🍬 Candy Kingdom Defense — Smart Farm v2.3.9  (NexusLib)
+    🍬 Candy Kingdom Defense — Smart Farm v2.3.10  (NexusLib)
 
     One script for both places of the game:
       • Lobby (Tree Fort):  rewards → feed → traits/stats → summon → pick the best mode → launch
@@ -12,7 +12,7 @@
 ]]
 
 -- Claim the running slot synchronously. A newer build replaces an older live copy instead of silently returning.
-local VERSION = "2.3.9"
+local VERSION = "2.3.10"
 do
     local old = _G.CKD_SF
     if old and old.alive then
@@ -30,6 +30,11 @@ end
 -- what changed, newest first (Updates tab; a one-time notice when a player first runs a new version)
 -- items: { icon, title, text, tag = NEW | IMPROVED | FIX }
 local CHANGELOG = {
+    { v = "2.3.10", date = "Nov 1, 2026", title = "Auto-Start Watchdog Gate Fix", items = {
+        { "▶️", "Removed the hidden outer gate", "The standalone Auto Start worker now always calls the first-wave recovery routine instead of blocking it with a stale firstWaveStarted check.", "FIX" },
+        { "👁️", "Visible START WAVE wins first", "START WAVE visibility is checked before wave-event or running flags, so stale pre-wave state cannot suppress Auto Start.", "FIX" },
+        { "🧹", "Force-latest loader support", "The replacement loader can clear the old runtime cache and reload this exact build immediately.", "FIX" },
+    } },
     { v = "2.3.9", date = "Nov 1, 2026", title = "Hard START WAVE Override", items = {
         { "▶️", "Visible button overrides running=true", "If CKD still shows START WAVE 1, that visible button now wins over stale Sync running state.", "FIX" },
         { "🖱️", "Click happens before state gating", "Smart Farm checks and presses START WAVE before asking whether the first wave already started.", "FIX" },
@@ -4183,14 +4188,13 @@ function MT.visibleStartWaveButton()
 end
 
 function MT.firstWaveStarted()
+    -- The visible game button is the strongest truth source. CKD may already report running=true and may
+    -- even have emitted a Wave 1 event while the player is still being asked to press START WAVE 1.
+    if MT.visibleStartWaveButton() then return false end
+
     if MT.over then return true end
     if (tonumber(MT.wave) or 0) > 1 then return true end
     if MT.roundWaveSeen == true then return true end
-
-    -- IMPORTANT: CKD can report running=true while the pre-wave START WAVE 1 button is still visible.
-    -- A visible START WAVE button is authoritative: Wave 1 has NOT actually started yet.
-    if MT.visibleStartWaveButton() then return false end
-
     if MT.running == true then return true end
     return false
 end
@@ -5840,12 +5844,14 @@ function MT.run()
     -- Auto Start watchdog is standalone from Battle AI / Speed Clear. This prevents START WAVE 1 deadlocks.
     task.spawn(function()
         while SF.alive and SF.where == "match" do
-            if MT.automationReady() and CFG.autoStart and not MT.firstWaveStarted() then
+            if MT.automationReady() and CFG.autoStart then
                 local now = U.now()
                 if MT.lastFirstWaveSendOkAt and now - MT.lastFirstWaveSendOkAt > 2.0 then
                     MT._waveActRemote = nil
                     MT.lastFirstWaveSendOkAt = nil
                 end
+                -- Do not gate this worker with firstWaveStarted(). tryStartFirstWave() owns that decision
+                -- because it can inspect the visible START WAVE button before trusting stale match flags.
                 pcall(MT.tryStartFirstWave, now, "standalone first-wave watchdog")
             end
             task.wait(0.20)
