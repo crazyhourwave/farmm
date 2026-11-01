@@ -1,5 +1,5 @@
 --[[
-    🍬 Candy Kingdom Defense — Smart Farm v2.0.4  (NexusLib)
+    🍬 Candy Kingdom Defense — Smart Farm v2.1.0  (NexusLib)
 
     One script for both places of the game:
       • Lobby (Tree Fort):  rewards → feed → traits/stats → summon → pick the best mode → launch
@@ -13,10 +13,16 @@
 
 -- claim the "running" slot synchronously, before any yield, so two queued loaders can't both start
 if _G.CKD_SF and _G.CKD_SF.alive then return end
-local VERSION = "2.0.4"
+local VERSION = "2.1.0"
 -- what changed, newest first (Updates tab; a one-time notice when a player first runs a new version)
 -- items: { icon, title, text, tag = NEW | IMPROVED | FIX }
 local CHANGELOG = {
+    { v = "2.1.0", date = "Oct 31, 2026", title = "Standalone Auto-Skip + Raid Continue", items = {
+        { "⚡", "Auto-Skip is standalone", "Reliable Instant Auto-Skip now works even when Smart Farm and Auto Play are both OFF.", "NEW" },
+        { "🎃", "Halloween Raid auto-continue", "After a raid win: NEXT → POUR 1 BUG MILK → wait for the next raid, automatically.", "NEW" },
+        { "🥛", "Safe milk handling", "The raid loop only presses the exact Bug Milk flow and stops if the expected button never appears.", "NEW" },
+        { "🖱️", "UI activation fallback", "Supports firesignal/getconnections when available and virtual mouse input as a fallback.", "NEW" },
+    } },
     { v = "2.0.4", date = "Oct 31, 2026", title = "Deep Client Profile Mirror", items = {
         { "🧠", "Finds hidden client profile tables", "Uses executor-visible Lua state to locate the profile object CKD keeps in memory during matches.", "NEW" },
         { "📦", "Live items + gems mirror", "Once found, Gems and known item currencies mirror directly from that table instead of waiting for lobby/result sync.", "NEW" },
@@ -252,6 +258,7 @@ C.DEFAULTS = {
     tourney = true,            -- weekly tournament: until its rewards are in, then again when the team grows
     tourneyRegrow = 1.15,      -- replay the tournament once team power is this much above the last attempt
     raids = true,              -- Halloween raid whenever a Raid Key (Bug Milk) is in the bag
+    raidContinue = true,        -- standalone: after a raid win press NEXT → POUR 1 BUG MILK → next raid
     infKeys = true,            -- out of keys: Infinite in the key world (100% key every 10 waves)
     keyTarget = 1,             -- farm keys until holding this many
     raidTeam = "",             -- raid team kinds (empty = your normal best team)
@@ -4274,6 +4281,157 @@ function MT.hubDue(pick)
     return nil
 end
 
+-- Standalone Halloween Raid continuation.
+-- The raid's post-win flow is UI-driven: VICTORY → NEXT → YOUR ITEMS → POUR 1 BUG MILK.
+local function raidGuiVisible(obj)
+    if not (obj and obj.Parent and obj:IsA("GuiObject")) then return false end
+    if obj.AbsoluteSize.X <= 1 or obj.AbsoluteSize.Y <= 1 then return false end
+    local cur = obj
+    while cur and cur ~= game do
+        if cur:IsA("GuiObject") and cur.Visible == false then return false end
+        cur = cur.Parent
+    end
+    return true
+end
+
+local function raidTextNorm(v)
+    return tostring(v or ""):upper():gsub("<[^>]->", ""):gsub("[^%w]", "")
+end
+
+function MT.findRaidButton(words)
+    local pg = LP:FindFirstChildOfClass("PlayerGui")
+    if not pg then return nil end
+    local wanted = {}
+    for _, word in ipairs(words or {}) do wanted[#wanted + 1] = raidTextNorm(word) end
+
+    for _, obj in ipairs(pg:GetDescendants()) do
+        if obj:IsA("GuiButton") and raidGuiVisible(obj) then
+            local chunks = {}
+            if obj:IsA("TextButton") then chunks[#chunks + 1] = obj.Text end
+            for _, d in ipairs(obj:GetDescendants()) do
+                if (d:IsA("TextLabel") or d:IsA("TextButton")) and raidGuiVisible(d) then
+                    chunks[#chunks + 1] = d.Text
+                end
+            end
+            local joined = raidTextNorm(table.concat(chunks, " "))
+            for _, needle in ipairs(wanted) do
+                if needle ~= "" and (joined == needle or joined:find(needle, 1, true)) then
+                    return obj, joined
+                end
+            end
+        end
+    end
+    return nil
+end
+
+function MT.activateRaidButton(btn)
+    if not (btn and btn.Parent) then return false, "button missing" end
+
+    local env
+    pcall(function() env = getgenv and getgenv() or _G end)
+    env = type(env) == "table" and env or _G
+
+    local fire = rawget(env, "firesignal") or rawget(_G, "firesignal")
+    if type(fire) == "function" then
+        local ok = pcall(fire, btn.Activated)
+        if ok then return true, "firesignal" end
+    end
+
+    local gc = rawget(env, "getconnections") or rawget(_G, "getconnections")
+    if type(gc) == "function" then
+        local ok, conns = pcall(gc, btn.Activated)
+        if ok and type(conns) == "table" then
+            local fired = false
+            for _, c in ipairs(conns) do
+                if type(c) == "table" or type(c) == "userdata" then
+                    if type(c.Fire) == "function" then
+                        pcall(c.Fire, c); fired = true
+                    elseif type(c.Function) == "function" then
+                        task.spawn(c.Function); fired = true
+                    end
+                end
+            end
+            if fired then return true, "connections" end
+        end
+    end
+
+    -- Executor-independent-ish fallback: click the visible button at its real screen position.
+    local okV, vim = pcall(game.GetService, game, "VirtualInputManager")
+    if okV and vim and raidGuiVisible(btn) then
+        local p = btn.AbsolutePosition + btn.AbsoluteSize / 2
+        local ok = pcall(function()
+            vim:SendMouseButtonEvent(p.X, p.Y, 0, true, game, 0)
+            task.wait(0.05)
+            vim:SendMouseButtonEvent(p.X, p.Y, 0, false, game, 0)
+        end)
+        if ok then return true, "virtual mouse" end
+    end
+
+    return false, "no supported activation method"
+end
+
+function MT.waitPressRaidButton(words, timeout, label)
+    local untilAt = U.now() + (tonumber(timeout) or 8)
+    while SF.alive and U.now() < untilAt do
+        local btn = MT.findRaidButton(words)
+        if btn then
+            SF.status("Raid", "auto continue · pressing " .. tostring(label or words[1]))
+            local ok, how = MT.activateRaidButton(btn)
+            if ok then
+                SF.log(1, "RAID", "auto continue pressed " .. tostring(label or words[1]) .. " via " .. tostring(how))
+                return true
+            end
+        end
+        task.wait(0.15)
+    end
+    return false
+end
+
+function MT.autoContinueRaid()
+    if not CFG.raidContinue then return false, "off" end
+    if not MT.raid then return false, "not raid" end
+    if not MT.won then return false, "raid not won" end
+
+    SF.status("Raid", "auto continue · waiting for NEXT")
+    if not MT.waitPressRaidButton({ "NEXT" }, 10, "NEXT") then
+        return false, "NEXT button not found"
+    end
+
+    -- NEXT opens the YOUR ITEMS dialog shown in the raid result flow.
+    task.wait(0.2)
+    SF.status("Raid", "auto continue · waiting for POUR 1 BUG MILK")
+    if not MT.waitPressRaidButton({ "POUR 1 BUG MILK", "POUR1BUGMILK" }, 10, "POUR 1 BUG MILK") then
+        return false, "POUR 1 BUG MILK button not found (out of milk or UI changed)"
+    end
+
+    SF.status("Raid", "🥛 Bug Milk poured · waiting for next raid")
+    SF.log(1, "RAID", "auto continue: NEXT → POUR 1 BUG MILK")
+
+    -- Wait for the server to reset/start the next raid. Do not require Smart Farm or Auto Play.
+    local deadline = U.now() + 20
+    while SF.alive and U.now() < deadline do
+        task.wait(0.25)
+        pcall(MT.resync)
+        if not MT.over then
+            MT.runStart = os.time()
+            MT.joinedMidRun = false
+            MT.won = nil
+            MT.result = nil
+            MT.finishing = false
+            table.clear(MT.dmg)
+            MT.dmgDelta = {}
+            table.clear(MT.abilityAt)
+            MT.resetRun()
+            SF.status("Raid", "🎃 next Halloween Raid started")
+            SF.log(1, "RAID", "next raid detected; standalone loop continues")
+            return true
+        end
+    end
+
+    MT.finishing = false
+    return false, "next raid did not start in time"
+end
+
 -- end of a run: record it, then decide replay / next stage / back to the lobby
 function MT.finish()
     if MT.finishing then return end
@@ -4383,6 +4541,17 @@ function MT.finish()
     B.pending = nil
     pcall(SF.HIVE.record, key, sec)
     SF.saveNow()
+
+    -- Standalone raid loop runs even when Smart Farm / Auto Play are OFF.
+    if MT.raid and MT.won and CFG.raidContinue then
+        local okRaid, continued, whyRaid = pcall(MT.autoContinueRaid)
+        if okRaid and continued then return end
+        SF.log(1, "RAID", "standalone auto continue stopped: " .. tostring(okRaid and whyRaid or continued))
+        MT.finishing = false
+        if not CFG.master or not CFG.play then return end
+        MT.finishing = true -- Smart Farm is on: fall through to the normal hub/planner fallback.
+    end
+
     if not CFG.master or not CFG.play then MT.finishing = false; return end
     -- decide what's next
     local pick = C.MODE.pick(B.prof)
@@ -4960,8 +5129,8 @@ function MT.run()
     -- Dedicated reliability worker: does not depend on the 0.25s economy/battle loop.
     task.spawn(function()
         while SF.alive and SF.where == "match" and not MT.over do
-            if CFG.master and CFG.battle and CFG.instantSkip then
-                local okSkip, errSkip = pcall(MT.tryInstantSkip, U.now(), "reliability worker")
+            if CFG.instantSkip then
+                local okSkip, errSkip = pcall(MT.tryInstantSkip, U.now(), "standalone reliability worker")
                 if not okSkip then SF.log(1, "WAVES", "skip worker: " .. tostring(errSkip)) end
             end
             local retry = math.max(0.08, math.min(0.20, tonumber(CFG.instantSkipRetry) or 0.12))
@@ -5743,7 +5912,8 @@ function GUI.build()
     tog(T, "Weekly Tournament", "Play for the fixed rewards, then replay as the team grows", "tourney")
     sld(T, "Replay When Stronger ×", "Team power growth needed for a replay", "tourneyRegrow", { min = 1, max = 2, step = 0.05, format = f2 })
     T:Section("🎃 Halloween Raid")
-    tog(T, "Raids", "Raid with a key once the battle sim wins with headroom", "raids")
+    tog(T, "Raids", "Smart Farm can choose and launch Halloween Raids", "raids")
+    tog(T, "Auto Continue Raid", "Standalone: after VICTORY press NEXT → POUR 1 BUG MILK → continue, even with Smart Farm / Auto Play OFF", "raidContinue")
     sld(T, "Raid Safety Margin", "Only raid if we'd still win against enemies this much tougher", "raidMinMargin", { min = 1, max = 2, step = 0.05, format = function(v) return string.format("+%d%%", math.floor((v - 1) * 100 + 0.5)) end })
     tog(T, "Farm Raid Keys", "Out of keys: Nightosphere Infinite", "infKeys")
     sld(T, "Keys To Hold", "Farm keys until you hold this many", "keyTarget", { min = 1, max = 10, step = 1, format = int })
@@ -5780,7 +5950,7 @@ function GUI.build()
     tog(T, "Score Upgrade Attacks", "Rate heroes by their upgraded attacks (area hits, stuns, burns), not just the first one", "scorePath")
     T:Section("WAVE CONTROL")
     tog(T, "Early Wave Calls", "Allow the farm to press the game's Skip Wave / Start action automatically", "earlyCall")
-    tog(T, "⚡ Reliable Instant Auto Skip", "Always keep Skip Wave armed in Normal + Infinite; retries until the server accepts it", "instantSkip")
+    tog(T, "⚡ Standalone Instant Auto Skip", "Works even with Smart Farm + Auto Play OFF; keeps Skip Wave armed until the server accepts it", "instantSkip")
     sld(T, "Instant Retry (s)", "Retry speed for Skip Wave. 0.12s is recommended; the server still controls the legal skip time.", "instantSkipRetry", { min = 0.08, max = 0.5, step = 0.02, format = f2 })
     sld(T, "Call With ≤ Enemies", "Used only when Instant Auto Skip is OFF · × learned boldness", "callAlive", { min = 1, max = 30, step = 1, format = int })
     sld(T, "Call With Front ≤", "Used only when Instant Auto Skip is OFF · furthest enemy allowed down the road", "callReach", { min = 0.1, max = 0.9, step = 0.05, format = pct })
