@@ -13,10 +13,16 @@
 
 -- claim the "running" slot synchronously, before any yield, so two queued loaders can't both start
 if _G.CKD_SF and _G.CKD_SF.alive then return end
-local VERSION = "2.1.3"
+local VERSION = "2.1.4"
 -- what changed, newest first (Updates tab; a one-time notice when a player first runs a new version)
 -- items: { icon, title, text, tag = NEW | IMPROVED | FIX }
 local CHANGELOG = {
+    { v = "2.1.4", date = "Nov 1, 2026", title = "Manual Team Means Manual", items = {
+        { "🧍", "All automatic team swaps removed", "Smart Farm no longer changes your equipped 6-unit team for raids, tournaments, clear plans, or anything else.", "FIX" },
+        { "🎃", "Raids preserve your team", "Halloween Raid launches use the exact team you already equipped.", "FIX" },
+        { "🥇", "Tournaments preserve your team", "Tournament launches no longer swap in a calculated tournament team.", "FIX" },
+        { "🧠", "Planning stays read-only", "Unit scoring and simulation may compare teams internally, but can never equip them.", "IMPROVED" },
+    } },
     { v = "2.1.3", date = "Nov 1, 2026", title = "Fully Paced Raid Continue", items = {
         { "⏱️", "Pause before YES", "After the Bug Milk pour is accepted, Smart Farm waits before confirming PLAY AGAIN.", "FIX" },
         { "✅", "Wait for confirmation to close", "After YES, the script waits for the PLAY AGAIN popup to disappear before checking for the next raid.", "FIX" },
@@ -2381,10 +2387,8 @@ function HUB.traits()
     local luck = C.Catalog.traitLuck and C.Catalog.traitLuck(p) or nil
     local ev = 0
     for _, t in ipairs(C.Catalog.TRAIT_ORDER) do ev = ev + C.Catalog.traitChance(t, luck) * C.M.traitValue(t) end
-    -- the heroes the farm actually plays with (the normal best team), not whatever is equipped right now:
-    -- the raid / tournament teams are swapped in before launches, and their heroes shouldn't get chased
-    local okT, teamSlots = pcall(HUB.bestTeam)
-    teamSlots = okT and teamSlots or p.slots or {}
+    -- Manual team policy: only consider the units the player actually equipped.
+    local teamSlots = p.slots or {}
     local best, bestG
     for _, id in ipairs(teamSlots) do
         local u = p.units[id]
@@ -2945,50 +2949,22 @@ function C.MODE.raidTeamKey(prof)
     table.sort(kinds)
     return table.concat(kinds, ",")
 end
--- raid team: the battle-sim pick (CFG.raidTeam kinds, best copy of each), filled up with the normal team
+-- Manual team policy: Smart Farm NEVER changes equipped slots.
+-- Internal planners may score candidate teams, but equipping is always the player's choice.
 function HUB.setRaidTeam()
-    local want, src = C.MODE.raidWant()
-    return HUB.setKindsTeam(want, "RAID", "raid team set: " .. src)
+    SF.log(2, "TEAM", "manual team preserved for raid")
+    return true
 end
--- equip these kinds (best copy of each), filled up with the current slots; true when set or already set
+
 function HUB.setKindsTeam(want, tag, msg)
-    local p = HUB.prof
-    if #want == 0 then return true end
-    local bestId = {}
-    for id, u in pairs(p.units or {}) do
-        local s = C.M.unitScore(u)
-        if not bestId[u.kind] or s > bestId[u.kind].s then bestId[u.kind] = { id = id, s = s } end
-    end
-    local slots, used = {}, {}
-    for _, k in ipairs(want) do
-        if bestId[k] and #slots < C.Catalog.SLOTS then table.insert(slots, bestId[k].id); used[bestId[k].id] = true end
-    end
-    for _, id in ipairs(p.slots or {}) do
-        if #slots < C.Catalog.SLOTS and id ~= "" and not used[id] then table.insert(slots, id); used[id] = true end
-    end
-    while #slots < C.Catalog.SLOTS do table.insert(slots, "") end
-    local same = true
-    for i = 1, C.Catalog.SLOTS do if (p.slots[i] or "") ~= slots[i] then same = false end end
-    if same then return true end
-    local res, err = SF.request("SetSlots", C.R("SetSlots"), slots)
-    if type(res) == "table" and res.ok then
-        HUB.apply(res)
-        SF.log(1, tag, msg)
-        return true
-    end
-    SF.log(1, tag, "team refused: " .. tostring(err))
-    return false
+    SF.log(2, tostring(tag or "TEAM"), "automatic team equip blocked · keeping player's current slots")
+    return true
 end
--- a normal map with a trusted clear plan (MT.clearCheck) plays with the plan's team
+
 function HUB.setPlanTeam(m)
-    local plan = C.MODE.clearPlan(m)
-    if not plan then return end
-    local want = {}
-    for k in tostring(plan.team):gmatch("[%w_]+") do table.insert(want, k) end
-    HUB.setKindsTeam(want, "PLAN", string.format("team for %s: %s (%s)", C.MODE.describe(m), table.concat(want, " "),
-        plan.inf and string.format("sim wave %d vs ~%d now", plan.wave or 0, math.floor(plan.real or 0))
-        or string.format("sim %ds vs %ds now", math.floor(plan.t or 0), math.floor(plan.real or 0))))
+    return true
 end
+
 -- the usable clear plan for a mode: made for this roster's heroes, trusted (the sim matched real times on
 -- this map), not rejected by real runs, fresh
 function C.MODE.clearPlan(m)
@@ -3001,7 +2977,6 @@ end
 -- raid: set the raid team, travel to the Raid Gate (the lobby's own area travel moves the character the
 -- same way), OpenRaid (uses a key), StartRaid → teleport
 function HUB.launchRaid(m)
-    HUB.setRaidTeam()
     if not HUB.travel("HubRaid") then SF.log(0, "RAID", "couldn't reach the Raid Gate"); return end
     local res, err = SF.request("OpenRaid", C.R("OpenRaid"))
     if not (type(res) == "table" and res.ok) then
@@ -3100,46 +3075,11 @@ function HUB.tourneyFetch()
 end
 -- tournament team: the week's buffed element hits x2 and the debuffed x0.5, so rank heroes by score × that
 function HUB.tourneyTeam()
-    local p = HUB.prof
-    local T = C.Catalog.TOURNEY
-    local okW, week = pcall(C.Catalog.tourneyAt, os.time())
-    if not (okW and type(week) == "table") then return true end
-    -- the planner's pick for this week (MT.tourneyCheck: simulated damage), best copy of each kind; else the
-    -- same combination search as the normal team (pair passives), with each hero scaled by the element mult
-    local slots, names, src = {}, {}, "planner"
-    local ts = B.tourneySim
-    if ts and ts.week == tostring(week.n) then
-        local bestId = {}
-        for id, u in pairs(p.units or {}) do
-            local s = C.M.unitScore(u)
-            if not bestId[u.kind] or s > bestId[u.kind].s then bestId[u.kind] = { id = id, s = s } end
-        end
-        for k in tostring(ts.team):gmatch("[%w_]+") do
-            if bestId[k] and #slots < C.Catalog.SLOTS then table.insert(slots, bestId[k].id); table.insert(names, k) end
-        end
-    end
-    if #slots < C.Catalog.SLOTS then
-        local chosen
-        slots, chosen = HUB.bestTeam(function(kind) return (C.Catalog.tourneyMult(week, kind) or 1) * C.M.tierMult(kind, "Tourney") end)
-        names, src = {}, "score"
-        for i, v in ipairs(chosen) do names[i] = v.u.kind end
-    end
-    while #slots < C.Catalog.SLOTS do table.insert(slots, "") end
-    local same = true
-    for i = 1, C.Catalog.SLOTS do if (p.slots[i] or "") ~= slots[i] then same = false end end
-    if same then return true end
-    local res, err = SF.request("SetSlots", C.R("SetSlots"), slots)
-    if type(res) == "table" and res.ok then
-        HUB.apply(res)
-        SF.log(1, "TOURNEY", string.format("team for %s week (buff %s ×%s, debuff %s ×%s, picked by %s): %s", tostring(week.world), tostring(week.buff), tostring(T.buff),
-            tostring(week.debuff), tostring(T.debuff), src, table.concat(names, " ")))
-        return true
-    end
-    SF.log(1, "TOURNEY", "team refused: " .. tostring(err))
-    return false
+    SF.log(2, "TOURNEY", "manual team preserved · no automatic tournament team equip")
+    return true
 end
+
 function HUB.launchTourney(m)
-    HUB.tourneyTeam()
     local st, err
     for _ = 1, 3 do
         st, err = SF.request("StartTourney", C.R("StartTourney"))
@@ -3180,7 +3120,6 @@ function HUB.play()
     if m.raid then return HUB.launchRaid(m) end
     if m.portal then return HUB.launchPortal(m) end
     if m.tourney then return HUB.launchTourney(m) end
-    pcall(HUB.setPlanTeam, m)
     local res, err = SF.request("CreateMatch", C.R("CreateMatch"), m.stage, m.challenge, m.infinite == true)
     if not (type(res) == "table" and res.ok) then
         HUB.createFails = (HUB.createFails or 0) + 1
