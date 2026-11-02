@@ -1,5 +1,5 @@
 --[[
-    🍬 Candy Kingdom Defense — Smart Farm v2.3.10  (NexusLib)
+    🍬 Candy Kingdom Defense — Smart Farm v2.4.0  (NexusLib)
 
     One script for both places of the game:
       • Lobby (Tree Fort):  rewards → feed → traits/stats → summon → pick the best mode → launch
@@ -12,7 +12,7 @@
 ]]
 
 -- Claim the running slot synchronously. A newer build replaces an older live copy instead of silently returning.
-local VERSION = "2.3.10"
+local VERSION = "2.4.0"
 do
     local old = _G.CKD_SF
     if old and old.alive then
@@ -30,6 +30,12 @@ end
 -- what changed, newest first (Updates tab; a one-time notice when a player first runs a new version)
 -- items: { icon, title, text, tag = NEW | IMPROVED | FIX }
 local CHANGELOG = {
+    { v = "2.4.0", date = "Nov 1, 2026", title = "Near-Start Placement Modes", items = {
+        { "🚩", "Near Start placement", "New placement mode aggressively favors legal spots beside the entrance / spawner while still requiring useful road coverage.", "NEW" },
+        { "🧠", "Smart placement preserved", "The existing coverage / planner placement remains untouched and can be selected at any time.", "IMPROVED" },
+        { "🎛️", "Three independent selectors", "Normal, Challenge and Tournament each get real Smart / Near Start buttons, so each mode can use a different placement style.", "NEW" },
+        { "🥇", "Tournament damage uptime", "Near Start prioritizes the earliest reachable path segment and then physical distance to the entrance, helping units begin attacking sooner.", "IMPROVED" },
+    } },
     { v = "2.3.10", date = "Nov 1, 2026", title = "Auto-Start Watchdog Gate Fix", items = {
         { "▶️", "Removed the hidden outer gate", "The standalone Auto Start worker now always calls the first-wave recovery routine instead of blocking it with a stale firstWaveStarted check.", "FIX" },
         { "👁️", "Visible START WAVE wins first", "START WAVE visibility is checked before wave-event or running flags, so stale pre-wave state cannot suppress Auto Start.", "FIX" },
@@ -391,6 +397,9 @@ C.DEFAULTS = {
     normalLoop = false,        -- manually selected normal World + Act overrides the planner and replays forever
     normalWorld = 1,           -- index in the playable normal-world list below
     normalAct = 1,             -- act index inside that world
+    placementNormal = "smart",     -- smart | start
+    placementChallenge = "smart",  -- smart | start
+    placementTournament = "smart", -- smart | start
     exploreBonus = 0.25,       -- optimism for modes with few runs (UCB weight)
     progressValue = 120,       -- gem-equivalent value of unlocking a new stage (Gems goal)
     switchMargin = 10,         -- % better needed to leave the match place for another mode
@@ -516,12 +525,17 @@ do
         saved.speedClearTarget = nil
     end
     if (tonumber(saved.cfgv) or 1) < 15 then saved.challengeFirstPriority = nil end
+    if (tonumber(saved.cfgv) or 1) < 16 then
+        saved.placementNormal = nil
+        saved.placementChallenge = nil
+        saved.placementTournament = nil
+    end
     -- sharing became on by default: only players who never touched the toggle get the new default
     if saved.shareChosen ~= true then saved.shareStats = nil end
     for k, v in pairs(C.DEFAULTS) do
         if saved[k] ~= nil and type(saved[k]) == type(v) then CFG[k] = saved[k] else CFG[k] = v end
     end
-    CFG.cfgv = 15
+    CFG.cfgv = 16
 end
 SF.saveAt = nil
 function SF.saveSoon() SF.saveAt = U.now() + 1.5 end
@@ -3764,7 +3778,7 @@ function MT.coverageAt(x, z, range, cut)
     local n = #pts
     local r2 = range * range
     cut = cut or MT.reachCut or 1
-    local s = 0
+    local s, firstF = 0, nil
     local ts = MT.tourney and B.tourneySim
     local style = ts and ts.week == tostring(MT.tourneyWeek and MT.tourneyWeek.n or "") and (C.STRATS[ts.strat or ""] or (ts.strat == "crowd" and type(ts.occ) == "table" and #ts.occ > 0 and MT.crowdStyle(ts.occ))) or nil
     -- a normal map with a trusted clear plan places the plan's way
@@ -3774,6 +3788,7 @@ function MT.coverageAt(x, z, range, cut)
         local dx, dz = p.X - x, p.Z - z
         if dx * dx + dz * dz <= r2 then
             local f = i / n
+            if not firstF then firstF = f end
             local w = 1.35 - 0.6 * f
             -- raid: stack the entrance (battle sim: fastest final clear at the same safety margin)
             if MT.raid and CFG.raidPlace == "entrance" then w = f < 0.35 and 1.5 or 0.25 end
@@ -3782,7 +3797,10 @@ function MT.coverageAt(x, z, range, cut)
             s = s + w
         end
     end
-    return s
+    local entrance = pts[1]
+    local startDist = entrance and math.sqrt((entrance.X - x) ^ 2 + (entrance.Z - z) ^ 2) or math.huge
+    -- Extra returns are ignored by existing callers. covTable uses them for Near Start ranking.
+    return s, firstF or 1, startDist
 end
 function MT.covRef(range) return math.max(1, 2 * range / MT.pathStep) end
 function MT.findMap()
@@ -3838,15 +3856,32 @@ function MT.covTable(range)
     local cut = math.floor((MT.reachCut or 1) * 10 + 0.5) / 10
     local key = math.floor(range + 0.5) .. ":" .. cut
     if MT.cov[key] then return MT.cov[key] end
-    local t = {}
+    local t, firstF, startDist, startScore = {}, {}, {}, {}
+    local roundedRange = math.floor(range + 0.5)
+    local ref = MT.covRef(range)
     for i, s in ipairs(MT.spots) do
-        t[i] = MT.coverageAt(s.x, s.z, math.floor(range + 0.5), cut)
+        local cov, first, dist = MT.coverageAt(s.x, s.z, roundedRange, cut)
+        t[i], firstF[i], startDist[i] = cov, first, dist
+        -- Near Start is intentionally aggressive:
+        --   1) reach the earliest path samples possible,
+        --   2) physically hug the entrance / spawner,
+        --   3) keep useful road coverage as the tiebreaker.
+        -- This is a separate selectable mode, so Smart placement remains unchanged.
+        local covNorm = cov / ref
+        startScore[i] = (1 - math.min(first, 1)) * 1000 - dist * 3.25 + covNorm * 35
         if i % 400 == 0 then task.wait() end
     end
-    local order = {}
-    for i = 1, #t do order[i] = i end
+    local order, startOrder = {}, {}
+    for i = 1, #t do order[i], startOrder[i] = i, i end
     table.sort(order, function(a, b) return t[a] > t[b] end)
-    t.order = order
+    table.sort(startOrder, function(a, b)
+        if math.abs(startScore[a] - startScore[b]) > 0.001 then return startScore[a] > startScore[b] end
+        if math.abs(firstF[a] - firstF[b]) > 0.001 then return firstF[a] < firstF[b] end
+        if math.abs(startDist[a] - startDist[b]) > 0.1 then return startDist[a] < startDist[b] end
+        return t[a] > t[b]
+    end)
+    t.order, t.startOrder = order, startOrder
+    t.firstF, t.startDist, t.startScore = firstF, startDist, startScore
     MT.cov[key] = t
     return t
 end
@@ -3881,18 +3916,36 @@ function MT.partnerBonus(kind, x, z)
     end
     return add
 end
--- best legal spot: road coverage, plus (for heroes with a pair passive) how much a spot next to partners adds
+function MT.placementMode()
+    if MT.tourney then
+        return CFG.placementTournament == "start" and "start" or "smart"
+    end
+    if MT.challenge then
+        return CFG.placementChallenge == "start" and "start" or "smart"
+    end
+    -- Raids keep their existing dedicated entrance behavior; portals keep the existing planner behavior.
+    if MT.raid or MT.portal then return "smart" end
+    return CFG.placementNormal == "start" and "start" or "smart"
+end
+
+-- best legal spot: Smart = existing road-coverage behavior.
+-- Near Start = earliest useful path contact + physical distance to the entrance, while still respecting
+-- canPlace, blocked spots, tower spacing and pair passives.
 function MT.bestSpot(range, kind, baseDps)
     local covT = MT.covTable(range)
     local W = MT.W()
     local towers = MT.towerList()
-    local order = covT.order
+    local nearStart = MT.placementMode() == "start"
+    local order = nearStart and covT.startOrder or covT.order
     local hasPassive = CFG.passives and kind and C.M.passive(kind) ~= nil
     local best, bestCov, bestV, bestExtra, valid = nil, 0, -1, 0, 0
-    for n = 1, math.min(#order, 600) do
+    for n = 1, math.min(#order, nearStart and 900 or 600) do
         local i = order[n]
         local s = MT.spots[i]
-        if covT[i] <= 0 then break end
+        if covT[i] <= 0 then
+            if not nearStart then break end
+            continue
+        end
         -- spots the server refused this match ("Something is in the way": an obstacle our map check
         -- doesn't see, or a bigger hero) are skipped, along with anything right next to them
         local bad = false
@@ -3906,8 +3959,13 @@ function MT.bestSpot(range, kind, baseDps)
             local pm = C.M.passiveMult(kind, MT.kindsNear(s.x, s.z))
             local extra = MT.partnerBonus(kind, s.x, s.z)
             local v = (baseDps or 1) * covT[i] / MT.covRef(range) * pm + extra
+            if nearStart then
+                -- Keep passive synergy useful, but do not let it drag a Tournament/Challenge unit far away
+                -- from the entrance after the player explicitly chose Near Start.
+                v = v + (baseDps or 1) * math.max(0, (covT.startScore[i] or 0) / 250)
+            end
             if v > bestV then best, bestCov, bestV, bestExtra = s, covT[i] * pm, v, extra end
-            if valid >= 40 then break end
+            if valid >= (nearStart and 24 or 40) then break end
         end
     end
     return best, bestCov, bestExtra
@@ -3943,7 +4001,7 @@ function MT.options()
                 local spot, cov, extra = MT.bestSpot(range, kind, MT.rowDps(L[1], m) * eff)
                 if spot then
                     local gain = MT.rowDps(L[1], m) * cov / MT.covRef(range) * eff + (extra or 0)
-                    local o = { kind = "place", unit = kind, spot = spot, cost = MT.cost(kind, 1), gain = gain, cov = cov / MT.covRef(range), extra = extra }
+                    local o = { kind = "place", unit = kind, spot = spot, cost = MT.cost(kind, 1), gain = gain, cov = cov / MT.covRef(range), extra = extra, placeMode = MT.placementMode() }
                     -- lookahead: a hero whose L1 is weak but whose L2/L3 are the best buys in the game (Magic Man:
                     -- 4.6 → 14 → 19 dps/$) must get placed to ever be upgraded — rate the placement by the best
                     -- of placing + 0, 1 or 2 upgrades at this spot, per total coin
@@ -4029,8 +4087,9 @@ function MT.economy()
         if type(res) == "table" and res.ok then
             MT.money = MT.money - pick.cost
             MT.towers[res.id or ("p" .. os.clock())] = MT.towers[res.id] or { id = res.id, owner = LP.UserId, kind = pick.unit, level = 1, x = pick.spot.x * W, z = pick.spot.z * W, spent = pick.cost }
-            local msg = string.format("placed %s at (%d,%d) coverage %.2f%s · $%d (%.2f dps/$%s)", pick.unit, pick.spot.x, pick.spot.z, pick.cov,
-                (pick.extra or 0) > 0 and string.format(" +%.0f dps from partners", pick.extra) or "", pick.cost, pick.ratio,
+            local msg = string.format("placed %s at (%d,%d) coverage %.2f%s · %s · $%d (%.2f dps/$%s)", pick.unit, pick.spot.x, pick.spot.z, pick.cov,
+                (pick.extra or 0) > 0 and string.format(" +%.0f dps from partners", pick.extra) or "",
+                pick.placeMode == "start" and "🚩 Near Start" or "🧠 Smart", pick.cost, pick.ratio,
                 (pick.ratio2 and pick.ratio2 >= pick.gain / math.max(1, pick.cost)) and (" counting L" .. tostring(pick.ahead)) or "")
             SF.log(1, "PLACE", msg)
             SF.status("Placement", msg)
@@ -6341,6 +6400,31 @@ function GUI.load()
                 local y=label(b,d or "",9,C.sub); y.Position=UDim2.fromOffset(48,22); y.Size=UDim2.new(1,-60,0,16); y.TextTruncate=Enum.TextTruncate.AtEnd
                 Win._track(b.Activated:Connect(function() if cb then pcall(cb) end end)); return b
             end
+            -- Two real side-by-side buttons with one selected state. Used for placement style selectors.
+            function T:Choice2(a,d,left,right,default,cb)
+                left=left or {text="Option 1",value=1}; right=right or {text="Option 2",value=2}
+                local state=(default==right.value) and right.value or left.value
+                local r=row(88)
+                local x=label(r,a,12,C.text,Enum.Font.GothamBold); x.Position=UDim2.fromOffset(14,6); x.Size=UDim2.new(1,-28,0,20)
+                local y=label(r,d or "",9,C.sub); y.Position=UDim2.fromOffset(14,27); y.Size=UDim2.new(1,-28,0,16); y.TextTruncate=Enum.TextTruncate.AtEnd
+                local l=Instance.new("TextButton"); l.Size=UDim2.new(0.5,-18,0,30); l.Position=UDim2.fromOffset(12,50); l.BorderSizePixel=0; l.Font=Enum.Font.GothamBold; l.TextSize=10; l.AutoButtonColor=false; l.Parent=r; corner(l,9); stroke(l)
+                local q=Instance.new("TextButton"); q.Size=UDim2.new(0.5,-18,0,30); q.Position=UDim2.new(0.5,6,0,50); q.BorderSizePixel=0; q.Font=Enum.Font.GothamBold; q.TextSize=10; q.AutoButtonColor=false; q.Parent=r; corner(q,9); stroke(q)
+                l.Text=tostring(left.text or left.value); q.Text=tostring(right.text or right.value)
+                local function draw()
+                    local lon=state==left.value
+                    l.BackgroundColor3=lon and C.accentD or C.panel; l.BackgroundTransparency=lon and 0 or 0.10; l.TextColor3=lon and C.text or C.sub
+                    q.BackgroundColor3=not lon and C.accentD or C.panel; q.BackgroundTransparency=not lon and 0 or 0.10; q.TextColor3=not lon and C.text or C.sub
+                end
+                local function set(v,silent)
+                    state=(v==right.value or v==2) and right.value or left.value
+                    draw()
+                    if not silent and cb then pcall(cb,state) end
+                end
+                draw()
+                Win._track(l.Activated:Connect(function() set(left.value,false) end))
+                Win._track(q.Activated:Connect(function() set(right.value,false) end))
+                return {Set=set,Get=function() return state end}
+            end
             function T:Label(txt)
                 local r=row(38); local l=label(r,txt,10,C.text,Enum.Font.GothamMedium); l.Position=UDim2.fromOffset(12,0); l.Size=UDim2.new(1,-24,1,0); return {Set=function(v) l.Text=tostring(v or "") end}
             end
@@ -6661,6 +6745,23 @@ function GUI.build()
         pcall(function() UI.normalLoop.Set(false, true) end)
         SF.saveNow()
         notify("Normal Loop", "Smart planner is back in control", "info")
+    end)
+
+    T:Section("📍 PLACEMENT STYLE")
+    T:Paragraph("Smart keeps the current coverage/planner placements. Near Start aggressively packs legal placements toward the entrance/spawner so units can begin dealing damage earlier.")
+    local smartChoice = { text = "🧠 Smart", value = "smart" }
+    local startChoice = { text = "🚩 Near Start", value = "start" }
+    UI.placementNormal = T:Choice2("Normal Placement", "Story, normal farming and Infinite stages", smartChoice, startChoice, CFG.placementNormal, function(v)
+        setCfg("placementNormal", v)
+        notify("Normal Placement", v == "start" and "Near Start selected" or "Smart placement selected", "success")
+    end)
+    UI.placementChallenge = T:Choice2("Challenge Placement", "Dungeon Train / Challenge matches", smartChoice, startChoice, CFG.placementChallenge, function(v)
+        setCfg("placementChallenge", v)
+        notify("Challenge Placement", v == "start" and "Near Start selected" or "Smart placement selected", "success")
+    end)
+    UI.placementTournament = T:Choice2("Tournament Placement", "Tournament scoring runs — Near Start aims for earlier damage uptime", smartChoice, startChoice, CFG.placementTournament, function(v)
+        setCfg("placementTournament", v)
+        notify("Tournament Placement", v == "start" and "Near Start selected" or "Smart placement selected", "success")
     end)
 
     T:Section("DUNGEON TRAIN")
