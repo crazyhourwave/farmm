@@ -1,5 +1,5 @@
 --[[
-    🍬 Candy Kingdom Defense — Smart Farm v2.4.1  (NexusLib)
+    🍬 Candy Kingdom Defense — Smart Farm v2.5.0  (Prism Deck)
 
     One script for both places of the game:
       • Lobby (Tree Fort):  rewards → feed → traits/stats → summon → pick the best mode → launch
@@ -12,7 +12,7 @@
 ]]
 
 -- Claim the running slot synchronously. A newer build replaces an older live copy instead of silently returning.
-local VERSION = "2.4.1"
+local VERSION = "2.5.0"
 do
     local old = _G.CKD_SF
     if old and old.alive then
@@ -30,6 +30,14 @@ end
 -- what changed, newest first (Updates tab; a one-time notice when a player first runs a new version)
 -- items: { icon, title, text, tag = NEW | IMPROVED | FIX }
 local CHANGELOG = {
+    { v = "2.5.0", date = "Nov 2, 2026", title = "Prism Deck + Adaptive Engine", items = {
+        { "◈", "Brand-new Prism Deck menu", "A new floating control-deck layout, graphite/candy glass language, redesigned cards and a live Adaptive Engine panel replace the previous shell.", "NEW" },
+        { "🧠", "Recent-run learning", "Mode confidence now blends long-term records with recent outcomes, and repeated losses at similar team power lower confidence until the team improves.", "NEW" },
+        { "⚠️", "Threat-aware economy", "Enemy reach, lives and leaks now change how aggressively the farm spends instead of always waiting for the mathematically best long-term buy.", "IMPROVED" },
+        { "🎯", "Adaptive targeting", "Target policy reacts to danger, bosses and Tournament scoring instead of only using attack cooldown.", "IMPROVED" },
+        { "⚡", "Smarter ability timing", "Speed Clear no longer blindly fires every ability at the first enemy when Smart Timing is enabled; it uses faster crowd/hold thresholds instead.", "FIX" },
+        { "📍", "Smarter Smart placement", "Smart placement checks several high-coverage legal spots and gently spreads towers instead of always taking the first legal maximum-overlap point.", "IMPROVED" },
+    } },
     { v = "2.4.1", date = "Nov 1, 2026", title = "Range-Aware Near Start", items = {
         { "🎯", "Uses each unit's attack range", "Near Start now backs units away from the spawner so the entrance sits near the outer part of their attack circle instead of wasting half the range behind spawn.", "FIX" },
         { "📏", "80% range sweet spot", "Placement targets about 80% of the unit's current placement range from the entrance, then uses early path coverage and total coverage to break ties.", "IMPROVED" },
@@ -1331,6 +1339,19 @@ function C.MODE.score(m, prof, power, cap, totalRuns)
     if m.infinite then p = 1 end
     -- the raid's prior comes from the battle simulator (current team wins with ~3x HP margin)
     if m.raid then p = (wins + 2 * 0.9) / (runs + 2) end
+
+    -- Adaptive confidence: recent outcomes matter when a team/meta changes, without throwing away
+    -- the long-term record. Repeated losses at roughly the current power are treated as a warning.
+    if rec.recentWin ~= nil and runs >= 2 and not m.infinite then
+        local rw = U.clamp(tonumber(rec.recentWin) or p, 0, 1)
+        local recentWeight = math.min(0.32, 0.08 + runs * 0.03)
+        p = p * (1 - recentWeight) + rw * recentWeight
+    end
+    if (tonumber(rec.lossStreak) or 0) >= 2 and rec.power and power > 0 and rec.power >= power * 0.90 and not m.infinite then
+        p = p * 0.86
+    end
+    p = U.clamp(p, 0.02, 1)
+    m.confidence = p
     -- reward in gem-equivalents (gems themselves × C.M.gemValue: less while there's nothing to buy)
     local R
     local gv = C.M.gemValue(prof)
@@ -3974,17 +3995,27 @@ function MT.bestSpot(range, kind, baseDps)
         local ok = not bad and MT.map:canPlace(Vector3.new(s.x, 0.25, s.z) * W, towers)
         if ok then
             valid = valid + 1
-            if not hasPassive then return s, covT[i], 0 end
-            local pm = C.M.passiveMult(kind, MT.kindsNear(s.x, s.z))
-            local extra = MT.partnerBonus(kind, s.x, s.z)
+            local pm = hasPassive and C.M.passiveMult(kind, MT.kindsNear(s.x, s.z)) or 1
+            local extra = hasPassive and MT.partnerBonus(kind, s.x, s.z) or 0
             local v = (baseDps or 1) * covT[i] / MT.covRef(range) * pm + extra
             if nearStart then
-                -- Keep passive synergy useful, but do not let it drag a Tournament/Challenge unit far away
-                -- from the entrance after the player explicitly chose Near Start.
                 v = v + (baseDps or 1) * math.max(0, (covT.startScore[i] or 0) / 250)
+            else
+                local nearest = math.huge
+                for _, tw in pairs(MT.towers) do
+                    if MT.mine(tw) then
+                        local dx, dz = tw.x / W - s.x, tw.z / W - s.z
+                        nearest = math.min(nearest, math.sqrt(dx * dx + dz * dz))
+                    end
+                end
+                if nearest < math.huge then
+                    local spread = U.clamp(nearest / math.max(8, range * 0.75), 0, 1)
+                    v = v * (0.90 + spread * 0.12)
+                end
             end
             if v > bestV then best, bestCov, bestV, bestExtra = s, covT[i] * pm, v, extra end
-            if valid >= (nearStart and 24 or 40) then break end
+            local wantValid = nearStart and 24 or (hasPassive and 40 or 28)
+            if valid >= wantValid then break end
         end
     end
     return best, bestCov, bestExtra
@@ -4004,6 +4035,16 @@ function MT.towerDps(t, lvl)
     local cov = MT.coverageAt(t.x / MT.W(), t.z / MT.W(), range) / MT.covRef(range)
     local pm = CFG.passives and C.M.passiveMult(t.kind, MT.kindsNear(t.x / MT.W(), t.z / MT.W(), t.id)) or 1
     return MT.rowDps(row, m) * cov * pm, range
+end
+
+function MT.threatLevel()
+    if SF.where ~= "match" then return 0 end
+    local reach = math.max(tonumber(MT.reachNow) or 0, tonumber(MT.runReach) or 0)
+    local st = C.Catalog.stage(MT.stage)
+    local maxLives = st and math.floor((st.lives or 20) * ((MT.mods and MT.mods.lives) or 1)) or math.max(1, tonumber(MT.lives) or 20)
+    local lifeDanger = 1 - U.clamp((tonumber(MT.lives) or maxLives) / math.max(1, maxLives), 0, 1)
+    local leakDanger = (MT.leaked and U.now() - MT.leaked < 18) and 0.78 or 0
+    return U.clamp(math.max(reach, lifeDanger * 0.92, leakDanger), 0, 1)
 end
 
 -- the economy: every option's damage gain per coin, then buy the best one (or save for it)
@@ -4070,9 +4111,13 @@ function MT.options()
     for _, t in pairs(MT.towers) do if MT.mine(t) then kinds[t.kind] = true end end
     local placedKinds, teamKinds = U.count(kinds), 0
     for _, k in ipairs(info.slots or {}) do if k ~= "" and MT.levels(k) then teamKinds = teamKinds + 1 end end
-    if placedKinds < math.min(4, teamKinds) then
+    local spreadGoal = math.min((MT.tourney or MT.challenge) and 5 or 4, teamKinds)
+    if placedKinds < spreadGoal then
         for _, o in ipairs(opts) do
-            if o.kind == "upgrade" and (o.level or 0) >= 3 then o.ratio = o.ratio * 0.5; o.spread = true end
+            if o.kind == "upgrade" and (o.level or 0) >= 3 then
+                o.ratio = o.ratio * (MT.tourney and 0.40 or 0.52)
+                o.spread = true
+            end
         end
     end
     table.sort(opts, function(a, b) return a.ratio > b.ratio end)
@@ -4088,12 +4133,16 @@ function MT.economy()
     else
         -- the best option is not affordable: buy the best affordable one only if it is nearly as good
         -- (or lives are dropping and damage is needed now), otherwise save
-        local urgent = MT.leaked and (U.now() - MT.leaked) < 15
+        local threat = MT.threatLevel()
+        local urgent = (MT.leaked and (U.now() - MT.leaked) < 15) or threat >= 0.62
+        local saveRatio = tonumber(CFG.saveRatio) or 0.82
+        local acceptRatio = U.clamp(saveRatio - threat * 0.35, 0.45, 0.95)
+        ST.Threat = string.format("%d%%", math.floor(threat * 100 + 0.5))
         for _, o in ipairs(opts) do
-            -- a cheap buy barely delays an expensive one: placing a $200 hero while saving $3000 for an
-            -- upgrade costs a few seconds of income, so it only has to be reasonably good, not near-best
-            local cheap = o.cost <= best.cost * 0.2 and o.ratio >= best.ratio * 0.4
-            if o.cost <= MT.money and (urgent or cheap or o.ratio >= best.ratio * CFG.saveRatio) then pick = o break end
+            -- Under pressure, immediate affordable damage matters more than a theoretically perfect buy
+            -- several income ticks away. When the lane is safe, keep the efficient save behavior.
+            local cheap = o.cost <= best.cost * 0.2 and o.ratio >= best.ratio * (0.40 - threat * 0.12)
+            if o.cost <= MT.money and (urgent or cheap or o.ratio >= best.ratio * acceptRatio) then pick = o break end
         end
     end
     if not pick then
@@ -4175,11 +4224,14 @@ function MT.abilities()
                 end
                 local need = MT.ABILITY_CROWD[ab.id] or 4
                 local held = now - MT.abilityReady[id]
-                local why = boss and "boss in range" or (cnt >= need and (cnt .. " enemies in range"))
-                    or (cnt > 0 and held >= CFG.abilityHold and ("held " .. math.floor(held) .. "s"))
-                if CFG.speedClear then
-                    why = cnt > 0 and "speed clear" or nil
-                elseif not CFG.abilityTiming then
+                local threat = MT.threatLevel and MT.threatLevel() or 0
+                local tunedNeed = CFG.speedClear and math.max(2, math.ceil(need * 0.65)) or need
+                local tunedHold = CFG.speedClear and math.min(8, tonumber(CFG.abilityHold) or 25) or (tonumber(CFG.abilityHold) or 25)
+                local why = boss and "boss in range"
+                    or (threat >= 0.72 and cnt > 0 and "lane danger")
+                    or (cnt >= tunedNeed and (cnt .. " enemies in range"))
+                    or (cnt > 0 and held >= tunedHold and ("held " .. math.floor(held) .. "s"))
+                if not CFG.abilityTiming then
                     why = cnt > 0 and "ready" or nil
                 end
                 if why then
@@ -4193,7 +4245,7 @@ function MT.abilities()
                         MT.abilityAt[id] = now + 6
                     end
                 else
-                    SF.status("Abilities", string.format("%s %s ready · waiting for %d+ enemies or a boss (%d in range)", t.kind, tostring(ab.name or "ability"), need, cnt))
+                    SF.status("Abilities", string.format("%s %s ready · waiting for %d+ enemies, danger or a boss (%d in range)", t.kind, tostring(ab.name or "ability"), tunedNeed, cnt))
                 end
             end
         end
@@ -4422,22 +4474,33 @@ function MT.learnAggr(event)
     MT.aggr = rec.aggr
 end
 
--- targeting: slow, heavy attacks go to the strongest enemy (bosses), fast ones to the first
+-- Adaptive targeting: protect the exit when the lane is dangerous, reduce overkill in Tournament / on
+-- bosses with Strongest for single-target hitters, and leave AoE pointed at First to catch packed waves.
 function MT.retarget()
     if not CFG.smartTarget then return end
+    local threat = MT.threatLevel and MT.threatLevel() or 0
+    local bossUp = false
+    for _, e in ipairs(MT.enemyList or {}) do if e.boss then bossUp = true break end end
+    local policy = threat >= 0.72 and "protect exit" or (MT.tourney and "tournament damage" or (bossUp and "boss focus" or "adaptive"))
+    ST.Targeting = string.format("%s · threat %d%%", policy, math.floor(threat * 100 + 0.5))
+
     for id, t in pairs(MT.towers) do
         if MT.mine(t) then
             local L = MT.levels(t.kind)
             local row = L and L[t.level]
             if row then
-                local want = ((row.cd or 1) >= 2.2 and not row.aoe) and "strongest" or "first"
+                local want
+                if threat >= 0.72 then want = "first"
+                elseif row.aoe then want = "first"
+                elseif MT.tourney or bossUp or (row.cd or 1) >= 1.8 then want = "strongest"
+                else want = "first" end
                 if t.targeting ~= want then
                     local res = SF.request("Act:target:" .. tostring(id), C.R("Act"), "target", id, want)
                     if type(res) == "table" and res.ok then
                         t.targeting = want
-                        SF.log(2, "TARGET", t.kind .. " #" .. tostring(id) .. " → " .. want)
+                        SF.log(2, "TARGET", t.kind .. " #" .. tostring(id) .. " → " .. want .. " (" .. policy .. ")")
                     else
-                        t.targeting = want -- don't retry every tick
+                        t.targeting = want
                     end
                 end
             end
@@ -5214,6 +5277,11 @@ function MT.finish()
     local stage = C.Catalog.stage(MT.stage)
     rec.diff = stage and C.M.stageDifficulty(stage, mode.challenge and C.Catalog.challengeMods(C.Catalog.challenge(mode.challenge)) or nil) or rec.diff
     rec.power = C.MODE.teamPower(B.prof)
+    local outcome = MT.won and 1 or 0
+    rec.recentWin = rec.recentWin == nil and outcome or (rec.recentWin * 0.65 + outcome * 0.35)
+    rec.recentSec = rec.recentSec and (rec.recentSec * 0.65 + sec * 0.35) or sec
+    rec.lossStreak = MT.won and 0 or ((tonumber(rec.lossStreak) or 0) + 1)
+    rec.lastAt = os.time()
     if MT.won and stage then
         local maxLives = (stage.lives or 20) * ((MT.mods and MT.mods.lives) or 1)
         local frac = U.clamp((tonumber(MT.lives) or 0) / math.max(1, maxLives), 0, 1)
