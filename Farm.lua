@@ -1,5 +1,5 @@
 --[[
-    🍬 Candy Kingdom Defense — Smart Farm v2.4.0  (NexusLib)
+    🍬 Candy Kingdom Defense — Smart Farm v2.4.1  (NexusLib)
 
     One script for both places of the game:
       • Lobby (Tree Fort):  rewards → feed → traits/stats → summon → pick the best mode → launch
@@ -12,7 +12,7 @@
 ]]
 
 -- Claim the running slot synchronously. A newer build replaces an older live copy instead of silently returning.
-local VERSION = "2.4.0"
+local VERSION = "2.4.1"
 do
     local old = _G.CKD_SF
     if old and old.alive then
@@ -30,11 +30,16 @@ end
 -- what changed, newest first (Updates tab; a one-time notice when a player first runs a new version)
 -- items: { icon, title, text, tag = NEW | IMPROVED | FIX }
 local CHANGELOG = {
+    { v = "2.4.1", date = "Nov 1, 2026", title = "Range-Aware Near Start", items = {
+        { "🎯", "Uses each unit's attack range", "Near Start now backs units away from the spawner so the entrance sits near the outer part of their attack circle instead of wasting half the range behind spawn.", "FIX" },
+        { "📏", "80% range sweet spot", "Placement targets about 80% of the unit's current placement range from the entrance, then uses early path coverage and total coverage to break ties.", "IMPROVED" },
+        { "🚫", "Too-close penalty", "Spots deep inside roughly half the unit's range are strongly penalized, preventing the pile-up shown near the spawn.", "FIX" },
+    } },
     { v = "2.4.0", date = "Nov 1, 2026", title = "Near-Start Placement Modes", items = {
         { "🚩", "Near Start placement", "New placement mode aggressively favors legal spots beside the entrance / spawner while still requiring useful road coverage.", "NEW" },
         { "🧠", "Smart placement preserved", "The existing coverage / planner placement remains untouched and can be selected at any time.", "IMPROVED" },
         { "🎛️", "Three independent selectors", "Normal, Challenge and Tournament each get real Smart / Near Start buttons, so each mode can use a different placement style.", "NEW" },
-        { "🥇", "Tournament damage uptime", "Near Start prioritizes the earliest reachable path segment and then physical distance to the entrance, helping units begin attacking sooner.", "IMPROVED" },
+        { "🥇", "Tournament damage uptime", "Near Start prioritizes early path contact while leaving enough distance for the unit's attack circle to cover more road in front of the spawner.", "IMPROVED" },
     } },
     { v = "2.3.10", date = "Nov 1, 2026", title = "Auto-Start Watchdog Gate Fix", items = {
         { "▶️", "Removed the hidden outer gate", "The standalone Auto Start worker now always calls the first-wave recovery routine instead of blocking it with a stale firstWaveStarted check.", "FIX" },
@@ -3859,16 +3864,30 @@ function MT.covTable(range)
     local t, firstF, startDist, startScore = {}, {}, {}, {}
     local roundedRange = math.floor(range + 0.5)
     local ref = MT.covRef(range)
+    -- Range-aware Near Start:
+    -- put the entrance near the outer portion of the attack circle instead of under the unit.
+    -- ~80% of range leaves a little safety margin while maximizing useful road in front of the tower.
+    local targetStartDist = math.max(8, range * 0.80)
+    local minComfortDist = math.max(5, range * 0.52)
     for i, s in ipairs(MT.spots) do
         local cov, first, dist = MT.coverageAt(s.x, s.z, roundedRange, cut)
         t[i], firstF[i], startDist[i] = cov, first, dist
-        -- Near Start is intentionally aggressive:
-        --   1) reach the earliest path samples possible,
-        --   2) physically hug the entrance / spawner,
-        --   3) keep useful road coverage as the tiebreaker.
-        -- This is a separate selectable mode, so Smart placement remains unchanged.
+
         local covNorm = cov / ref
-        startScore[i] = (1 - math.min(first, 1)) * 1000 - dist * 3.25 + covNorm * 35
+        local targetError = math.abs(dist - targetStartDist)
+        local tooClose = math.max(0, minComfortDist - dist)
+
+        -- Priority:
+        --   1) the unit must still reach the very beginning of the lane,
+        --   2) center the placement around ~80% of its range from spawn,
+        --   3) strongly reject placements that sit almost on top of spawn,
+        --   4) prefer more total useful road coverage.
+        startScore[i] =
+            (1 - math.min(first, 1)) * 1100
+            - targetError * 5.0
+            - tooClose * 14.0
+            + covNorm * 55
+
         if i % 400 == 0 then task.wait() end
     end
     local order, startOrder = {}, {}
