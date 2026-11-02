@@ -1,7 +1,7 @@
 -- CKD Smart Farm - FORCE LATEST loader
 -- Clears stale v2.3.x runtime state/cache, then loads the newest Farm.lua from main.
 
-local EXPECT = "2.4.0"
+local EXPECT = "2.4.1"
 local BASE = "https://raw.githubusercontent.com/crazyhourwave/farmm/main/Farm.lua"
 local CACHE = "CKD_SmartFarm/runtime.lua"
 
