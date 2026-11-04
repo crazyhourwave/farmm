@@ -1,6 +1,6 @@
 -- Hour Hub - Angry Birds Tower Defense [BETA] v0.1.0
 if not game:IsLoaded() then game.Loaded:Wait() end
-local VERSION="0.2.0"
+local VERSION="0.2.1"
 if game.PlaceId~=95568014894521 then warn("[Hour Hub / ABTD] wrong place "..tostring(game.PlaceId)) return end
 
 local Players=game:GetService("Players")
@@ -469,7 +469,8 @@ local main=Instance.new("Frame")main.Size=UDim2.fromOffset(680,500)main.Position
 local top=Instance.new("Frame")top.Size=UDim2.new(1,0,0,72)top.BackgroundColor3=C.panel top.BorderSizePixel=0 top.Parent=main corner(top,18)
 local title=label(top,"🐦  HOUR HUB // ANGRY BIRDS TD",18,C.text,Enum.Font.GothamBlack)title.Position=UDim2.fromOffset(18,10)title.Size=UDim2.new(1,-150,0,26)
 local sub=label(top,"LIVE PATH AI • v"..VERSION,9,C.sub,Enum.Font.GothamBold)sub.Position=UDim2.fromOffset(20,39)sub.Size=UDim2.new(1,-150,0,18)
-local active=label(top,"● ACTIVE",10,C.green,Enum.Font.GothamBold)active.Position=UDim2.new(1,-104,0,26)active.Size=UDim2.fromOffset(88,20)active.TextXAlignment=Enum.TextXAlignment.Center
+local active=label(top,"● ACTIVE",10,C.green,Enum.Font.GothamBold)active.Position=UDim2.new(1,-146,0,26)active.Size=UDim2.fromOffset(92,20)active.TextXAlignment=Enum.TextXAlignment.Center
+local close=Instance.new("TextButton")close.Size=UDim2.fromOffset(32,32)close.Position=UDim2.new(1,-42,0,20)close.BackgroundColor3=Color3.fromRGB(48,48,61)close.BorderSizePixel=0 close.Text="×" close.TextColor3=C.text close.Font=Enum.Font.GothamBold close.TextSize=20 close.AutoButtonColor=false close.Parent=top corner(close,10)stroke(close)
 local body=Instance.new("ScrollingFrame")body.Position=UDim2.fromOffset(14,84)body.Size=UDim2.new(1,-28,1,-98)body.BackgroundTransparency=1 body.BorderSizePixel=0 body.AutomaticCanvasSize=Enum.AutomaticSize.Y body.CanvasSize=UDim2.new()body.ScrollBarThickness=3 body.ScrollBarImageColor3=C.red body.Parent=main
 local ll=Instance.new("UIListLayout")ll.Padding=UDim.new(0,8)ll.Parent=body
 local order=0
@@ -516,6 +517,25 @@ local dragging,ds,dp=false
 top.InputBegan:Connect(function(i)if i.UserInputType==Enum.UserInputType.MouseButton1 then dragging=true ds=i.Position dp=main.Position end end)
 UIS.InputChanged:Connect(function(i)if dragging and i.UserInputType==Enum.UserInputType.MouseMovement then local d=i.Position-ds main.Position=UDim2.new(dp.X.Scale,dp.X.Offset+d.X,dp.Y.Scale,dp.Y.Offset+d.Y)end end)
 UIS.InputEnded:Connect(function(i)if i.UserInputType==Enum.UserInputType.MouseButton1 then dragging=false end end)
+
+function S.setMenuVisible(v)
+    if not sg.Parent then return false end
+    sg.Enabled=v==true
+    return sg.Enabled
+end
+function S.isMenuVisible()
+    return sg.Parent~=nil and sg.Enabled==true
+end
+function S.toggleMenu()
+    if not sg.Parent then return false end
+    sg.Enabled=not sg.Enabled
+    print("[Hour Hub] ABTD menu "..(sg.Enabled and "opened" or "closed"))
+    return sg.Enabled
+end
+close.Activated:Connect(function()
+    S.setMenuVisible(false)
+    print("[Hour Hub] ABTD menu closed • execute the loader again to reopen")
+end)
 
 function S.unload()
     S.alive=false
