@@ -1,6 +1,6 @@
 -- Hour Hub - Angry Birds Tower Defense [BETA] v0.1.0
 if not game:IsLoaded() then game.Loaded:Wait() end
-local VERSION="0.3.0"
+local VERSION="0.3.1"
 if game.PlaceId~=95568014894521 then warn("[Hour Hub / ABTD] wrong place "..tostring(game.PlaceId)) return end
 
 local Players=game:GetService("Players")
@@ -761,7 +761,7 @@ sec("MASTER")toggle("Smart Hub","Master switch for Angry Birds automation","mast
 sec("WAVES")toggle("⚡ Auto Skip Next Wave","Presses the real SKIP TO NEXT WAVE button","autoSkip")toggle("▶ Auto Start","Presses START WAVE / READY when visible","autoStart")toggle("⏩ Auto 2X","Keeps the normal unlocked 2X selected","auto2x")toggle("🔁 Auto Continue / Replay","NEXT / CONTINUE / REPLAY after results","autoContinue")
 sec("TOWERS")toggle("🧠 Auto Place","Reads visible tower cards, costs and caps and places affordable towers","autoPlace")toggle("⬆ Auto Upgrade","Best-effort upgrades towers placed by the hub","autoUpgrade")toggle("🔄 Auto Merge","Best-effort merge/combine when exposed by the selected tower","autoMerge")
 sec("LIVE BRAIN")
-local dr=row(126)local dt=label(dr,"Learning...",10,C.text,Enum.Font.Code)dt.Position=UDim2.fromOffset(14,10)dt.Size=UDim2.new(1,-28,1,-20)dt.TextWrapped=true dt.TextYAlignment=Enum.TextYAlignment.Top
+local dr=row(150)local dt=label(dr,"v0.3.1 booting • placement remote calibration ready",10,C.text,Enum.Font.Code)dt.Position=UDim2.fromOffset(14,10)dt.Size=UDim2.new(1,-28,1,-20)dt.TextWrapped=true dt.TextYAlignment=Enum.TextYAlignment.Top
 task.spawn(function()
     while S.alive and sg.Parent do
         local _,conf=spawnPoint()
