@@ -4,7 +4,7 @@
 if not game:IsLoaded() then game.Loaded:Wait() end
 
 -- ABTD: bypass Hub.lua completely so stale hub instances/caches cannot preserve an old module.
-local EXPECT_ABTD="0.4.0"
+local EXPECT_ABTD="0.5.0"
 if game.PlaceId==95568014894521 then
     local pg=game:GetService("Players").LocalPlayer:FindFirstChildOfClass("PlayerGui")
     local ab=rawget(_G,"HOUR_ABTD")
