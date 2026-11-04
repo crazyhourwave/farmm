@@ -5,17 +5,22 @@ if not game:IsLoaded() then game.Loaded:Wait() end
 
 -- Menu-toggle behavior: if Hour Hub is already active, executing this loader again only
 -- hides/shows the current menu. Automation keeps running in the background.
+local legacyAbShouldHide=false
 do
     local h=rawget(_G,"HOUR_HUB")
     if h and h.alive and type(h.toggleMenu)=="function" then
         local ok=pcall(h.toggleMenu)
         if ok then return end
     end
-    -- Compatibility with an older Hub.lua already running before v1.0.1.
+    -- Compatibility with an older ABTD module already running before v0.2.1.
     local ab=rawget(_G,"HOUR_ABTD")
     if ab and ab.alive and type(ab.toggleMenu)=="function" then
         local ok=pcall(ab.toggleMenu)
         if ok then return end
+    elseif ab and ab.alive then
+        -- Upgrade the legacy module below, but preserve the user's intent: this re-execution
+        -- should CLOSE the menu, not replace it with another visible copy.
+        legacyAbShouldHide=true
     end
 end
 
@@ -57,6 +62,16 @@ local fn,err=loadstring(src,"=HourHub_ForceLatest")
 if not fn then warn("[Hour Hub] compile failed: "..tostring(err)) return end
 local ran,rerr=pcall(fn)
 if not ran then warn("[Hour Hub] runtime failed: "..tostring(rerr)) return end
+
+if legacyAbShouldHide then
+    pcall(function()
+        local ab=rawget(_G,"HOUR_ABTD")
+        if ab and type(ab.setMenuVisible)=="function" then
+            ab.setMenuVisible(false)
+            print("[Hour Hub] upgraded ABTD and kept the menu closed")
+        end
+    end)
+end
 
 task.delay(1,function()
     local h=_G.HOUR_HUB
