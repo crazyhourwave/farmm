@@ -1,11 +1,14 @@
 -- Hour Hub - Angry Birds Tower Defense [BETA] v0.1.0
 if not game:IsLoaded() then game.Loaded:Wait() end
-local VERSION="0.2.2"
+local VERSION="0.2.3"
 if game.PlaceId~=95568014894521 then warn("[Hour Hub / ABTD] wrong place "..tostring(game.PlaceId)) return end
 
 local Players=game:GetService("Players")
 local UIS=game:GetService("UserInputService")
 local VIM=game:GetService("VirtualInputManager")
+local VU=game:GetService("VirtualUser")
+local GuiService=game:GetService("GuiService")
+local ReplicatedStorage=game:GetService("ReplicatedStorage")
 local Http=game:GetService("HttpService")
 local LP=Players.LocalPlayer
 local PG=LP:FindFirstChildOfClass("PlayerGui") or LP:WaitForChild("PlayerGui")
@@ -78,41 +81,83 @@ local function clickGui(b)
         VIM:SendMouseButtonEvent(p.X,p.Y,0,false,game,0)
     end)
 end
+local function clickAtXY(x,y,method)
+    if method=="executor" then
+        local mover=rawget(_G,"mousemoveabs") or rawget((getgenv and getgenv()) or _G,"mousemoveabs")
+        local clicker=rawget(_G,"mouse1click") or rawget((getgenv and getgenv()) or _G,"mouse1click")
+        local press=rawget(_G,"mouse1press") or rawget((getgenv and getgenv()) or _G,"mouse1press")
+        local release=rawget(_G,"mouse1release") or rawget((getgenv and getgenv()) or _G,"mouse1release")
+        if type(mover)=="function" and (type(clicker)=="function" or (type(press)=="function" and type(release)=="function")) then
+            mover(math.floor(x),math.floor(y))
+            task.wait(.16)
+            if type(clicker)=="function" then clicker()
+            else press() task.wait(.06) release() end
+            return true
+        end
+        return false
+    elseif method=="virtualuser" then
+        VU:CaptureController()
+        local pt=Vector2.new(x,y)
+        VU:Button1Down(pt,Cam.CFrame)
+        task.wait(.06)
+        VU:Button1Up(pt,Cam.CFrame)
+        return true
+    else
+        VIM:SendMouseMoveEvent(x,y,game)
+        task.wait(.16)
+        VIM:SendMouseButtonEvent(x,y,0,true,game,0)
+        task.wait(.06)
+        VIM:SendMouseButtonEvent(x,y,0,false,game,0)
+        return true
+    end
+end
+
 local function clickWorld(p)
     Cam=workspace.CurrentCamera or Cam
     if not Cam then return false end
 
-    -- VirtualInputManager uses desktop/screen mouse coordinates. WorldToViewportPoint omits the
-    -- Roblox top-bar inset, which can leave the ghost in one place and confirm the click somewhere else.
-    local okScreen,v,on=pcall(function()
-        local q,visible=Cam:WorldToScreenPoint(p)
-        return q,visible
-    end)
-    if not okScreen or not v then
-        v,on=Cam:WorldToViewportPoint(p)
-    end
-    if not on or v.Z<=0 then
+    local screen,screenOn=Cam:WorldToScreenPoint(p)
+    local view,viewOn=Cam:WorldToViewportPoint(p)
+    if (not screenOn and not viewOn) or (screen.Z<=0 and view.Z<=0) then
         S.status.click="candidate off-screen"
         return false
     end
 
     local hub=PG:FindFirstChild("HourHub_ABTD")
     local wasEnabled=hub and hub.Enabled
-    if hub then hub.Enabled=false end -- never let our own menu eat a world-placement click
+    if hub then hub.Enabled=false end
 
-    local ok,err=pcall(function()
-        VIM:SendMouseMoveEvent(v.X,v.Y,game)
-        task.wait(.14) -- give ABTD's ghost/range preview time to follow Mouse.Hit
-        VIM:SendMouseButtonEvent(v.X,v.Y,0,true,game,0)
-        task.wait(.07)
-        VIM:SendMouseButtonEvent(v.X,v.Y,0,false,game,0)
-    end)
+    -- Some executors/Roblox input paths disagree on whether coordinates include the GUI inset.
+    -- Try the exact screen point first, then viewport coordinates as a fallback.
+    local attempts={
+        {"executor",screen.X,screen.Y},
+        {"executor",view.X,view.Y},
+        {"virtualuser",screen.X,screen.Y},
+        {"virtualuser",view.X,view.Y},
+        {"vim",screen.X,screen.Y},
+        {"vim",view.X,view.Y},
+    }
 
-    task.wait(.04)
+    local used,ok,lastErr
+    for _,a in ipairs(attempts) do
+        local m,x,y=a[1],a[2],a[3]
+        local success,res=pcall(clickAtXY,x,y,m)
+        if success and res then
+            used=m
+            ok=true
+            S.status.click=string.format("%s @ %.0f,%.0f",m,x,y)
+            task.wait(.10)
+            break
+        else
+            lastErr=res
+        end
+    end
+
     if hub and hub.Parent then hub.Enabled=wasEnabled~=false end
-
-    S.status.click=string.format("screen %.0f,%.0f • %s",v.X,v.Y,ok and "clicked" or ("input error: "..tostring(err)))
-    return ok
+    if not ok then
+        S.status.click="all input methods failed: "..tostring(lastErr)
+    end
+    return ok==true
 end
 local function due(k,sec)
     local n=os.clock()
@@ -394,6 +439,21 @@ local function currentCard(i)
     local cs=cards()
     return cs[i]
 end
+local function likelyPlacementRemotes()
+    local names={}
+    for _,d in ipairs(ReplicatedStorage:GetDescendants()) do
+        if d:IsA("RemoteEvent") or d:IsA("RemoteFunction") then
+            local n=d.Name:lower()
+            if n:find("place") or n:find("deploy") or n:find("tower") or n:find("unit") or n:find("spawn") then
+                table.insert(names,d:GetFullName():gsub("^ReplicatedStorage%.",""))
+            end
+        end
+    end
+    table.sort(names)
+    S.status.remotes=#names>0 and table.concat(names,", ",1,math.min(3,#names)) or "none found"
+    return names
+end
+
 local function modelsNear(p,r)
     local out={}
     for _,m in ipairs(workspace:GetDescendants()) do
@@ -458,7 +518,13 @@ local function upgrade()
     return done(false)
 end
 
-task.spawn(function() while S.alive do pcall(learn) task.wait(.18) end end)
+task.spawn(function()
+    while S.alive do
+        pcall(learn)
+        if due("remoteScan",5) then pcall(likelyPlacementRemotes) end
+        task.wait(.18)
+    end
+end)
 task.spawn(function()
     while S.alive do
         if CFG.master then
@@ -535,6 +601,7 @@ task.spawn(function()
             "Waves: "..tostring(S.status.wave or"watching").."    Speed: "..tostring(S.status.speed or"watching"),
             "Placement: "..tostring(S.status.place or"learning").."    Cards: "..tostring(S.status.cards or"scanning"),
             "Click: "..tostring(S.status.click or"waiting"),
+            "Placement remotes: "..tostring(S.status.remotes or"scanning"),
             "Upgrade: "..tostring(S.status.upgrade or"idle").."    Match: "..tostring(S.status.match or"active"),
         },"\n")
         task.wait(.35)
