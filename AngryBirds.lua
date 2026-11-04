@@ -1,6 +1,6 @@
 -- Hour Hub - Angry Birds Tower Defense [BETA] v0.1.0
 if not game:IsLoaded() then game.Loaded:Wait() end
-local VERSION="0.2.4"
+local VERSION="0.3.0"
 if game.PlaceId~=95568014894521 then warn("[Hour Hub / ABTD] wrong place "..tostring(game.PlaceId)) return end
 
 local Players=game:GetService("Players")
@@ -17,7 +17,7 @@ local Cam=workspace.CurrentCamera
 local old=_G.HOUR_ABTD
 if old and old.alive then pcall(function() if old.unload then old.unload() else old.alive=false end end) end
 
-local S={VERSION=VERSION,alive=true,busy=false,last={},tracks={},spawn={},path={},placed={},ranges={},placedBySlot={},status={}}
+local S={VERSION=VERSION,alive=true,busy=false,last={},tracks={},spawn={},path={},placed={},ranges={},placedBySlot={},status={},remoteCandidates={},placeRemote=nil,lastPlacementClickAt=0,lastPlacementWorld=nil}
 _G.HOUR_ABTD=S
 
 local CFG={master=true,autoSkip=true,autoStart=true,auto2x=true,autoContinue=true,autoPlace=true,autoUpgrade=true,autoMerge=true,placementMode="smart",rangeFallback=30,placementInterval=.75,upgradeInterval=1.1}
@@ -174,6 +174,134 @@ local function due(k,sec)
     S.last[k]=n
     return true
 end
+
+local function placementUiActive()
+    for _,d in ipairs(PG:GetDescendants()) do
+        if (d:IsA("TextLabel") or d:IsA("TextButton")) and vis(d) then
+            local t=norm(d.Text)
+            if t:find("TO CANCEL",1,true) or (t:find("ROTATE",1,true) and t:find("R",1,true)) then return true end
+        end
+    end
+    return false
+end
+
+local function collectPositionNodes(v,path,out,depth,seen)
+    depth=depth or 0
+    if depth>5 then return end
+    local tv=typeof(v)
+    if tv=="Vector3" then
+        table.insert(out,{path=path,pos=v,kind="Vector3"})
+    elseif tv=="CFrame" then
+        table.insert(out,{path=path,pos=v.Position,kind="CFrame"})
+    elseif type(v)=="table" then
+        seen=seen or {}
+        if seen[v] then return end
+        seen[v]=true
+        for k,x in pairs(v) do
+            local p=table.clone(path)
+            table.insert(p,k)
+            collectPositionNodes(x,p,out,depth+1,seen)
+        end
+    end
+end
+local function cloneValue(v,depth,seen)
+    depth=depth or 0
+    if depth>6 or type(v)~="table" then return v end
+    seen=seen or {}
+    if seen[v] then return seen[v] end
+    local o={}
+    seen[v]=o
+    for k,x in pairs(v) do o[cloneValue(k,depth+1,seen)]=cloneValue(x,depth+1,seen) end
+    return o
+end
+local function setAtPath(root,path,target)
+    if #path==0 then
+        if typeof(root)=="Vector3" then return target end
+        if typeof(root)=="CFrame" then return CFrame.new(target)*(root-root.Position) end
+        return root
+    end
+    if type(root)~="table" then return root end
+    local out=cloneValue(root)
+    local cur=out
+    for i=1,#path-1 do
+        local k=path[i]
+        if type(cur[k])~="table" then return out end
+        cur=cur[k]
+    end
+    local k=path[#path]
+    local old=cur[k]
+    if typeof(old)=="Vector3" then cur[k]=target
+    elseif typeof(old)=="CFrame" then cur[k]=CFrame.new(target)*(old-old.Position) end
+    return out
+end
+local function argsForTarget(tpl,target)
+    local out=table.create(tpl.args.n)
+    for i=1,tpl.args.n do out[i]=cloneValue(tpl.args[i]) end
+    local root=out[tpl.argIndex]
+    out[tpl.argIndex]=setAtPath(root,tpl.path,target)
+    return out,tpl.args.n
+end
+local function firePlacementRemote(tpl,target)
+    if not tpl or not tpl.remote or not tpl.remote.Parent then return false,"remote missing" end
+    local args,n=argsForTarget(tpl,target)
+    local ok,res=pcall(function()
+        if tpl.method=="FireServer" then tpl.remote:FireServer(table.unpack(args,1,n)); return true end
+        tpl.remote:InvokeServer(table.unpack(args,1,n)); return true
+    end)
+    return ok and res==true,ok and nil or res
+end
+
+-- Capture the actual placement remote/argument shape from ONE real manual placement.
+do
+    local env=(getgenv and getgenv()) or _G
+    local hookmm=rawget(env,"hookmetamethod") or rawget(_G,"hookmetamethod")
+    local getncm=rawget(env,"getnamecallmethod") or rawget(_G,"getnamecallmethod")
+    local ncc=rawget(env,"newcclosure") or rawget(_G,"newcclosure") or function(fn)return fn end
+    if type(hookmm)=="function" and type(getncm)=="function" then
+        local oldNamecall
+        oldNamecall=hookmm(game,"__namecall",ncc(function(self,...)
+            local method=getncm()
+            if S.alive and (method=="FireServer" or method=="InvokeServer")
+                and (self:IsA("RemoteEvent") or self:IsA("RemoteFunction"))
+                and (placementUiActive() or os.clock()-(S.lastPlacementClickAt or 0)<1.25) then
+
+                local pack=table.pack(...)
+                local nodes={}
+                for i=1,pack.n do collectPositionNodes(pack[i],{i},nodes,0,{}) end
+                if #nodes>0 then
+                    local ref=S.lastPlacementWorld
+                    local best,bd
+                    for _,node in ipairs(nodes) do
+                        local d=ref and (node.pos-ref).Magnitude or 0
+                        if not bd or d<bd then best,bd=node,d end
+                    end
+                    if best and (not ref or bd<90) then
+                        local p=table.clone(best.path)
+                        local argIndex=table.remove(p,1)
+                        table.insert(S.remoteCandidates,{
+                            remote=self,method=method,args=cloneValue(pack),argIndex=argIndex,path=p,
+                            at=os.clock(),distance=bd or 0,full=self:GetFullName(),
+                        })
+                        while #S.remoteCandidates>12 do table.remove(S.remoteCandidates,1) end
+                        S.status.remoteLearn="candidate "..self:GetFullName()
+                    end
+                end
+            end
+            return oldNamecall(self,...)
+        end))
+        S._oldNamecall=oldNamecall
+        S.status.remoteLearn="armed • place ONE tower manually"
+    else
+        S.status.remoteLearn="executor lacks hookmetamethod"
+    end
+end
+
+UIS.InputBegan:Connect(function(i,gp)
+    if i.UserInputType==Enum.UserInputType.MouseButton1 and placementUiActive() then
+        S.lastPlacementClickAt=os.clock()
+        pcall(function() S.lastPlacementWorld=LP:GetMouse().Hit.Position end)
+    end
+end)
 
 local function allText(o)
     local a={}
@@ -448,6 +576,29 @@ local function currentCard(i)
     local cs=cards()
     return cs[i]
 end
+local function cardSnapshot()
+    local t={}
+    for _,c in ipairs(cards()) do t[c.index]=c.current end
+    return t
+end
+local function learnRemoteFromPlacement(before,after)
+    if S.placeRemote then return end
+    local changed
+    for i,n in pairs(after) do
+        if n>(before[i] or 0) then changed=i break end
+    end
+    if not changed then return end
+    local now=os.clock()
+    for i=#S.remoteCandidates,1,-1 do
+        local c=S.remoteCandidates[i]
+        if now-c.at<2.0 then
+            S.placeRemote=c
+            S.status.remoteLearn="LEARNED "..c.full.." • slot "..tostring(changed)
+            print("[Hour Hub] learned ABTD placement remote: "..c.full)
+            return
+        end
+    end
+end
 local function likelyPlacementRemotes()
     local names={}
     for _,d in ipairs(ReplicatedStorage:GetDescendants()) do
@@ -475,45 +626,47 @@ local function modelsNear(p,r)
 end
 local function place(c)
     if S.busy then return false,"another tower action is running" end
+    if not S.placeRemote then
+        S.status.place="CALIBRATION: place ONE tower manually once"
+        return false,"waiting for placement remote calibration"
+    end
+
     S.busy=true
     local function done(a,b) S.busy=false return a,b end
     if not clickGui(c.button) then return done(false,"card click failed") end
-    task.wait(.1)
+    task.wait(.10)
+
     local r=previewRange() or S.ranges[c.index] or CFG.rangeFallback
     S.ranges[c.index]=r
     local opts=candidates(r,CFG.placementMode)
     if #opts==0 then return done(false,"learning pig path") end
+
     local before=c.current
-    for i=1,math.min(14,#opts) do
+    for i=1,math.min(18,#opts) do
         local p=opts[i].pos
         if nearestPlaced(p)>5 then
-            S.status.place=string.format("trying candidate %d/%d",i,math.min(14,#opts))
+            S.status.place=string.format("remote candidate %d/%d",i,math.min(18,#opts))
             local beforeModels=modelsNear(p,11)
-            local function verifyPlaced()
-                local c2=currentCard(c.index)
-                if c2 and c2.current>before then return true end
-                for m in pairs(modelsNear(p,11)) do
-                    if not beforeModels[m] then return true end
-                end
-                return false
-            end
-            local placed=clickWorld(p,verifyPlaced)
-            task.wait(.12)
+            local ok,err=firePlacementRemote(S.placeRemote,p)
+            task.wait(.24)
+
+            local c2=currentCard(c.index)
+            local placed=(c2 and c2.current>before) or false
             if not placed then
-                S.status.place="candidate "..tostring(i).." rejected by every input method"
+                for m in pairs(modelsNear(p,11)) do if not beforeModels[m] then placed=true break end end
             end
+
             if placed then
                 table.insert(S.placed,p)
                 S.placedBySlot[c.index]=(S.placedBySlot[c.index] or 0)+1
+                S.status.click="REMOTE • ACCEPTED • "..S.placeRemote.full
                 S.status.place=string.format("slot %d • %s • range %.0f",c.index,CFG.placementMode=="spawn" and "near spawner" or "smart",r)
                 return done(true)
             end
-            -- Keep the card selected for the next candidate; if the game cancelled placement, reselect it.
-            local c3=currentCard(c.index)
-            if c3 then clickGui(c3.button) task.wait(.10) end
+            S.status.click="remote rejected candidate "..tostring(i)..(err and (" • "..tostring(err)) or "")
         end
     end
-    return done(false,"no accepted spot")
+    return done(false,"placement remote rejected every candidate")
 end
 local function upgrade()
     if S.busy then return false end
@@ -530,10 +683,14 @@ local function upgrade()
 end
 
 task.spawn(function()
+    local prev=cardSnapshot()
     while S.alive do
         pcall(learn)
         if due("remoteScan",5) then pcall(likelyPlacementRemotes) end
-        task.wait(.18)
+        local now=cardSnapshot()
+        pcall(learnRemoteFromPlacement,prev,now)
+        prev=now
+        task.wait(.12)
     end
 end)
 task.spawn(function()
@@ -613,6 +770,7 @@ task.spawn(function()
             "Placement: "..tostring(S.status.place or"learning").."    Cards: "..tostring(S.status.cards or"scanning"),
             "Click: "..tostring(S.status.click or"waiting"),
             "Placement remotes: "..tostring(S.status.remotes or"scanning"),
+            "Remote learner: "..tostring(S.status.remoteLearn or"arming"),
             "Upgrade: "..tostring(S.status.upgrade or"idle").."    Match: "..tostring(S.status.match or"active"),
         },"\n")
         task.wait(.35)
