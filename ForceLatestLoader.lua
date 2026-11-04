@@ -3,6 +3,22 @@
 
 if not game:IsLoaded() then game.Loaded:Wait() end
 
+-- Menu-toggle behavior: if Hour Hub is already active, executing this loader again only
+-- hides/shows the current menu. Automation keeps running in the background.
+do
+    local h=rawget(_G,"HOUR_HUB")
+    if h and h.alive and type(h.toggleMenu)=="function" then
+        local ok=pcall(h.toggleMenu)
+        if ok then return end
+    end
+    -- Compatibility with an older Hub.lua already running before v1.0.1.
+    local ab=rawget(_G,"HOUR_ABTD")
+    if ab and ab.alive and type(ab.toggleMenu)=="function" then
+        local ok=pcall(ab.toggleMenu)
+        if ok then return end
+    end
+end
+
 local env=(getgenv and getgenv()) or _G
 
 -- Best-effort clear of stale teleport loaders.
