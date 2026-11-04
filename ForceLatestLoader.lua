@@ -4,7 +4,7 @@
 if not game:IsLoaded() then game.Loaded:Wait() end
 
 -- Menu-toggle behavior: current build = hide/show. Outdated/broken build = reload.
-local EXPECT_ABTD="0.2.4"
+local EXPECT_ABTD="0.3.0"
 local legacyAbShouldHide=false
 do
     if game.PlaceId==95568014894521 then
