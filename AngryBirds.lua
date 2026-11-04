@@ -14,7 +14,7 @@ local Cam=workspace.CurrentCamera
 local old=_G.HOUR_ABTD
 if old and old.alive then pcall(function() if old.unload then old.unload() else old.alive=false end end) end
 
-local S={VERSION=VERSION,alive=true,last={},tracks={},spawn={},path={},placed={},ranges={},placedBySlot={},status={}}
+local S={VERSION=VERSION,alive=true,busy=false,last={},tracks={},spawn={},path={},placed={},ranges={},placedBySlot={},status={}}
 _G.HOUR_ABTD=S
 
 local CFG={master=true,autoSkip=true,autoStart=true,auto2x=true,autoContinue=true,autoPlace=true,autoUpgrade=true,autoMerge=true,placementMode="smart",rangeFallback=30,placementInterval=.75,upgradeInterval=1.1}
@@ -285,12 +285,15 @@ local function chooseCard()
 end
 local function currentCard(i) return cards()[i] end
 local function place(c)
-    if not clickGui(c.button) then return false,"card click failed" end
+    if S.busy then return false,"another tower action is running" end
+    S.busy=true
+    local function done(a,b) S.busy=false return a,b end
+    if not clickGui(c.button) then return done(false,"card click failed") end
     task.wait(.1)
     local r=previewRange() or S.ranges[c.index] or CFG.rangeFallback
     S.ranges[c.index]=r
     local opts=candidates(r,CFG.placementMode)
-    if #opts==0 then return false,"learning pig path" end
+    if #opts==0 then return done(false,"learning pig path") end
     local before=c.current
     for i=1,math.min(8,#opts) do
         local p=opts[i].pos
@@ -301,22 +304,26 @@ local function place(c)
                 table.insert(S.placed,p)
                 S.placedBySlot[c.index]=(S.placedBySlot[c.index] or 0)+1
                 S.status.place=string.format("slot %d • %s • range %.0f",c.index,CFG.placementMode=="spawn" and "near spawner" or "smart",r)
-                return true
+                return done(true)
             end
             local c3=currentCard(c.index)
             if c3 then clickGui(c3.button) task.wait(.08) end
         end
     end
-    return false,"no accepted spot"
+    return done(false,"no accepted spot")
 end
 local function upgrade()
+    if S.busy then return false end
+    S.busy=true
+    local function done(v) S.busy=false return v end
     for _,p in ipairs(S.placed) do
         if clickWorld(p) then
             task.wait(.08)
-            if CFG.autoMerge then local b=matchButton({"MERGE","COMBINE"}) if b and clickGui(b) then S.status.upgrade="merged" return true end end
-            if CFG.autoUpgrade then local b=matchButton({"UPGRADE","LEVEL UP"}) if b and clickGui(b) then S.status.upgrade="upgraded" return true end end
+            if CFG.autoMerge then local b=matchButton({"MERGE","COMBINE"}) if b and clickGui(b) then S.status.upgrade="merged" return done(true) end end
+            if CFG.autoUpgrade then local b=matchButton({"UPGRADE","LEVEL UP"}) if b and clickGui(b) then S.status.upgrade="upgraded" return done(true) end end
         end
     end
+    return done(false)
 end
 
 task.spawn(function() while S.alive do pcall(learn) task.wait(.18) end end)
@@ -326,7 +333,7 @@ task.spawn(function()
             if CFG.autoSkip and due("skip",.55) then local b=matchButton({"SKIP TO NEXT WAVE"}) if b and clickGui(b) then S.status.wave="skip pressed" end end
             if CFG.autoStart and due("start",.7) then local b=matchButton({"START WAVE","START ROUND","READY"}) if b and clickGui(b) then S.status.wave="start pressed" end end
             if CFG.auto2x and due("speed",2) then local b=matchButton({"2X"}) if b then clickGui(b) S.status.speed="2X requested" end end
-            if CFG.autoContinue and due("cont",1.2) then local b=matchButton({"PLAY AGAIN","REPLAY","NEXT","CONTINUE"}) if b and clickGui(b) then S.status.match="continue/replay pressed" end end
+            if CFG.autoContinue and due("cont",1.2) then local b=matchButton({"PLAY AGAIN","REPLAY","CONTINUE","NEXT LEVEL","NEXT MAP","NEXT STAGE"}) if b and clickGui(b) then S.status.match="continue/replay pressed" end end
         end
         task.wait(.12)
     end
