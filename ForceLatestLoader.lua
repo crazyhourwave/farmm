@@ -4,7 +4,7 @@
 if not game:IsLoaded() then game.Loaded:Wait() end
 
 -- Menu-toggle behavior: current build = hide/show. Outdated build = upgrade first.
-local EXPECT_ABTD="0.2.2"
+local EXPECT_ABTD="0.2.3"
 local legacyAbShouldHide=false
 do
     local ab=rawget(_G,"HOUR_ABTD")
