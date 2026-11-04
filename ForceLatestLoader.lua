@@ -3,39 +3,80 @@
 
 if not game:IsLoaded() then game.Loaded:Wait() end
 
--- Menu-toggle behavior: current build = hide/show. Outdated/broken build = reload.
-local EXPECT_ABTD="0.3.0"
-local legacyAbShouldHide=false
-do
-    if game.PlaceId==95568014894521 then
-        local ab=rawget(_G,"HOUR_ABTD")
-        local current=ab and ab.alive and tostring(ab.VERSION)==EXPECT_ABTD
-        local pg=game:GetService("Players").LocalPlayer:FindFirstChildOfClass("PlayerGui")
-        local gui=pg and pg:FindFirstChild("HourHub_ABTD")
+-- ABTD: bypass Hub.lua completely so stale hub instances/caches cannot preserve an old module.
+local EXPECT_ABTD="0.3.1"
+if game.PlaceId==95568014894521 then
+    local pg=game:GetService("Players").LocalPlayer:FindFirstChildOfClass("PlayerGui")
+    local ab=rawget(_G,"HOUR_ABTD")
+    local gui=pg and pg:FindFirstChild("HourHub_ABTD")
 
-        if current and gui and gui:IsA("ScreenGui") then
-            -- Toggle the real ScreenGui directly. This does not depend on hub/global delegation.
-            gui.Enabled=not gui.Enabled
-            print("[Hour Hub] ABTD menu "..(gui.Enabled and "OPENED" or "CLOSED").." directly")
-            return
-        end
-
-        if ab and ab.alive and not current then
-            print("[Hour Hub] ABTD v"..tostring(ab.VERSION).." is outdated; upgrading to v"..EXPECT_ABTD)
-        elseif current and not gui then
-            -- Module survived but its UI did not. Reload instead of silently returning.
-            warn("[Hour Hub] ABTD module is alive but its menu is missing; rebuilding UI")
-        elseif ab and ab.alive then
-            legacyAbShouldHide=true
-        end
-    else
-        -- Other games can still delegate to their module-specific menu API.
-        local h=rawget(_G,"HOUR_HUB")
-        if h and h.alive and type(h.toggleMenu)=="function" then
-            local ok=pcall(h.toggleMenu)
-            if ok then return end
-        end
+    if ab and ab.alive and tostring(ab.VERSION)==EXPECT_ABTD and gui and gui:IsA("ScreenGui") then
+        gui.Enabled=not gui.Enabled
+        print("[Hour Hub] ABTD menu "..(gui.Enabled and "OPENED" or "CLOSED").." directly")
+        return
     end
+
+    -- Tear down every stale copy first.
+    pcall(function() if _G.HOUR_HUB and _G.HOUR_HUB.unload then _G.HOUR_HUB.unload() end end)
+    pcall(function() if _G.HOUR_ABTD and _G.HOUR_ABTD.unload then _G.HOUR_ABTD.unload() end end)
+    _G.HOUR_HUB=nil
+    _G.HOUR_ABTD=nil
+    pcall(function()
+        if pg then
+            local g=pg:FindFirstChild("HourHub_ABTD")
+            if g then g:Destroy() end
+        end
+    end)
+
+    task.wait(.12)
+
+    local url="https://raw.githubusercontent.com/crazyhourwave/farmm/main/AngryBirds.lua?force="..tostring(os.time()).."_"..tostring(math.random(100000,999999))
+    local ok,src=pcall(function() return game:HttpGet(url) end)
+    if not ok or type(src)~="string" or #src<1000 then
+        warn("[Hour Hub] direct ABTD download failed: "..tostring(src))
+        return
+    end
+
+    local got=src:match('local%s+VERSION%s*=%s*"([^"]+)"')
+    if got~=EXPECT_ABTD then
+        warn("[Hour Hub] REFUSED stale ABTD source: expected v"..EXPECT_ABTD..", got "..tostring(got))
+        return
+    end
+
+    local fn,err=loadstring(src,"=HourHub/AngryBirds_v"..EXPECT_ABTD)
+    if not fn then
+        warn("[Hour Hub] ABTD compile failed: "..tostring(err))
+        return
+    end
+    local ran,rerr=pcall(fn)
+    if not ran then
+        warn("[Hour Hub] ABTD runtime failed: "..tostring(rerr))
+        return
+    end
+
+    -- Minimal hub wrapper so future executions can still toggle cleanly.
+    local H={VERSION="1.0.2",alive=true,place=game.PlaceId,route={name="Angry Birds Tower Defense",file="AngryBirds.lua"}}
+    function H.toggleMenu()
+        local g=pg and pg:FindFirstChild("HourHub_ABTD")
+        if g and g:IsA("ScreenGui") then g.Enabled=not g.Enabled return g.Enabled end
+        return false
+    end
+    function H.unload()
+        H.alive=false
+        pcall(function() if _G.HOUR_ABTD and _G.HOUR_ABTD.unload then _G.HOUR_ABTD.unload() end end)
+        if _G.HOUR_HUB==H then _G.HOUR_HUB=nil end
+    end
+    _G.HOUR_HUB=H
+
+    task.delay(.5,function()
+        local live=rawget(_G,"HOUR_ABTD")
+        if live and live.alive then
+            print("[Hour Hub] DIRECT ABTD active v"..tostring(live.VERSION))
+        else
+            warn("[Hour Hub] direct ABTD build did not stay active")
+        end
+    end)
+    return
 end
 
 local env=(getgenv and getgenv()) or _G
