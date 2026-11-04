@@ -1,6 +1,6 @@
 -- Hour Hub - Angry Birds Tower Defense [BETA] v0.1.0
 if not game:IsLoaded() then game.Loaded:Wait() end
-local VERSION="0.1.0"
+local VERSION="0.2.0"
 if game.PlaceId~=95568014894521 then warn("[Hour Hub / ABTD] wrong place "..tostring(game.PlaceId)) return end
 
 local Players=game:GetService("Players")
@@ -84,8 +84,12 @@ local function clickWorld(p)
     local v,on=Cam:WorldToViewportPoint(p)
     if not on or v.Z<=0 then return false end
     return pcall(function()
+        -- ABTD updates its placement ghost from the live mouse position. Move first, give the
+        -- preview a couple frames to settle, THEN confirm with the click.
+        VIM:SendMouseMoveEvent(v.X,v.Y,game)
+        task.wait(.09)
         VIM:SendMouseButtonEvent(v.X,v.Y,0,true,game,0)
-        task.wait(.05)
+        task.wait(.06)
         VIM:SendMouseButtonEvent(v.X,v.Y,0,false,game,0)
     end)
 end
@@ -117,24 +121,64 @@ local function money()
     end
     return best
 end
-local function cardData(b)
-    local t=allText(b)
-    local a,z=t:match("(%d+)%s*/%s*(%d+)")
-    local cost
-    for s in t:gmatch("[%d,]+") do
-        local n=tonumber(s:gsub(",",""))
-        if n and n>=25 and not (a and (n==tonumber(a) or n==tonumber(z))) then cost=math.min(cost or n,n) end
+local function center2(o)
+    return o.AbsolutePosition+o.AbsoluteSize/2
+end
+local function nearestButtonTo(pos,vp)
+    local best,bd
+    for _,b in ipairs(PG:GetDescendants()) do
+        if b:IsA("GuiButton") and vis(b) and b.AbsoluteSize.X>=42 and b.AbsoluteSize.Y>=42 and b.AbsolutePosition.Y>vp.Y*.48 then
+            local c=center2(b)
+            local dx,dy=c.X-pos.X,c.Y-pos.Y
+            local d=dx*dx+dy*dy*.55
+            if math.abs(dx)<120 and math.abs(dy)<180 and (not bd or d<bd) then best,bd=b,d end
+        end
     end
-    return tonumber(a),tonumber(z),cost,t
+    return best
+end
+local function costNear(pos,vp)
+    local best,bd
+    for _,d in ipairs(PG:GetDescendants()) do
+        if d:IsA("TextLabel") and vis(d) and d.AbsolutePosition.Y>vp.Y*.48 then
+            local raw=tostring(d.Text or "")
+            if not raw:find("/") then
+                local n=tonumber(raw:gsub("[^%d]",""))
+                if n and n>=25 and n<=100000 then
+                    local c=center2(d)
+                    local dx,dy=c.X-pos.X,c.Y-pos.Y
+                    -- Cost is normally below the cap/card. Prefer the closest number in the same column.
+                    if math.abs(dx)<82 and dy>-30 and dy<220 then
+                        local score=dx*dx+dy*dy*.35
+                        if not bd or score<bd then best,bd=n,score end
+                    end
+                end
+            end
+        end
+    end
+    return best
 end
 local function cards()
     Cam=workspace.CurrentCamera or Cam
     local vp=Cam and Cam.ViewportSize or Vector2.new(1920,1080)
     local out={}
-    for _,b in ipairs(PG:GetDescendants()) do
-        if b:IsA("GuiButton") and vis(b) and b.AbsolutePosition.Y>vp.Y*.58 and b.AbsoluteSize.X>50 and b.AbsoluteSize.Y>50 then
-            local a,z,c,t=cardData(b)
-            if z and z>0 and z<=20 and (c or a==z) then table.insert(out,{button=b,current=a or 0,max=z,cost=c or math.huge,text=t,x=b.AbsolutePosition.X}) end
+    -- ABTD's cap label and price are not guaranteed to be descendants of the clickable ImageButton.
+    -- Treat each visible "0/3", "3/3", etc. near the hotbar as the anchor for one tower card.
+    for _,d in ipairs(PG:GetDescendants()) do
+        if (d:IsA("TextLabel") or d:IsA("TextButton")) and vis(d) and d.AbsolutePosition.Y>vp.Y*.50 then
+            local a,z=tostring(d.Text or ""):match("(%d+)%s*/%s*(%d+)")
+            a,z=tonumber(a),tonumber(z)
+            if a and z and z>0 and z<=20 and a<=z then
+                local p=center2(d)
+                local dup=false
+                for _,c in ipairs(out) do if math.abs(c.x-p.X)<28 then dup=true break end end
+                if not dup then
+                    local b=ancestorButton(d) or nearestButtonTo(p,vp)
+                    if b then
+                        local cost=costNear(p,vp) or math.huge
+                        table.insert(out,{button=b,current=a,max=z,cost=cost,text=allText(b),x=p.X,capLabel=d})
+                    end
+                end
+            end
         end
     end
     table.sort(out,function(a,b)return a.x<b.x end)
@@ -152,22 +196,58 @@ local function modelPos(m)
 end
 local function enemyModel(lbl)
     local p=lbl
-    for _=1,10 do
-        p=p.Parent
+    for _=1,12 do
         if not p then break end
         if p:IsA("BillboardGui") and p.Adornee then
             local a=p.Adornee
             return a:IsA("Model") and a or a:FindFirstAncestorOfClass("Model") or a
         end
         if p:IsA("Model") then return p end
+        p=p.Parent
     end
+end
+local function playerCharacter(m)
+    return m and m:IsA("Model") and Players:GetPlayerFromCharacter(m)~=nil
+end
+local function enemyEvidence(m)
+    if not m or playerCharacter(m) then return false end
+    local n=norm(m.Name)
+    if n:find("PIG",1,true) or n:find("HUNGRY",1,true) or n:find("RUNNER",1,true) or n:find("BOSS",1,true) then return true end
+    local checked=0
+    for _,d in ipairs(m:GetDescendants()) do
+        if d:IsA("TextLabel") then
+            checked+=1
+            local t=norm(d.Text)
+            if t:find("PIG",1,true) or t:find("HUNGRY",1,true) or t:find("RUNNER",1,true) then return true end
+            local a,z=t:match("(%d+)%s*/%s*(%d+)")
+            if a and z and tonumber(z) and tonumber(z)>0 then return true end
+            if checked>=18 then break end
+        end
+    end
+    return false
 end
 local function enemies()
     local out={}
-    for _,d in ipairs(workspace:GetDescendants()) do
-        if d:IsA("TextLabel") and norm(d.Text):find("PIG",1,true) then
-            local m=enemyModel(d)
-            if m and modelPos(m) then out[m]=true end
+    -- First: overhead BillboardGuis, which is where ABTD renders the Pig/Hungry Pig/Runner Pig labels.
+    for _,g in ipairs(workspace:GetDescendants()) do
+        if g:IsA("BillboardGui") then
+            local hit=false
+            for _,d in ipairs(g:GetDescendants()) do
+                if d:IsA("TextLabel") then
+                    local t=norm(d.Text)
+                    if t:find("PIG",1,true) or t:find("HUNGRY",1,true) or t:find("RUNNER",1,true) or t:match("%d+%s*/%s*%d+") then hit=true break end
+                end
+            end
+            if hit then
+                local m=enemyModel(g)
+                if m and modelPos(m) and not playerCharacter(m) then out[m]=true end
+            end
+        end
+    end
+    -- Fallback: model/name/health evidence. This survives UI hierarchy changes in the beta.
+    if next(out)==nil then
+        for _,m in ipairs(workspace:GetDescendants()) do
+            if m:IsA("Model") and enemyEvidence(m) and modelPos(m) then out[m]=true end
         end
     end
     return out
@@ -188,7 +268,7 @@ local function learn()
             local tr=S.tracks[m]
             if not tr then tr={} S.tracks[m]=tr table.insert(S.spawn,p) if #S.spawn>50 then table.remove(S.spawn,1) end end
             local l=tr[#tr]
-            if not l or (p-l).Magnitude>2.3 then table.insert(tr,p) end
+            if not l or (p-l).Magnitude>1.15 then table.insert(tr,p) if #tr>180 then table.remove(tr,1) end end
             if #tr>#S.path then
                 local sp=spawnPoint()
                 if not sp or (tr[1]-sp).Magnitude<25 then S.path=tr end
@@ -216,10 +296,16 @@ local function previewRange()
         if d:IsA("BasePart") then
             local n=d.Name:lower()
             local s=math.max(d.Size.X,d.Size.Z)
-            if (n:find("range") or n:find("radius") or n:find("circle")) and s>=12 and s<=220 then best=math.max(best or 0,s/2) end
+            if (n:find("range") or n:find("radius") or n:find("circle") or n:find("placement")) and s>=10 and s<=220 then
+                -- Range circles are normally very flat. Prefer those over unrelated world parts.
+                local flat=math.min(d.Size.Y,d.Size.X,d.Size.Z)
+                local score=s+(flat<=3 and 1000 or 0)
+                if not best or score>best.score then best={range=s/2,score=score,name=d.Name} end
+            end
         end
     end
-    return best
+    if best then S.status.range="detected "..best.name.." ≈"..math.floor(best.range+.5) return best.range end
+    S.status.range="fallback "..tostring(CFG.rangeFallback)
 end
 local function nearestPlaced(p)
     local d=math.huge
@@ -262,7 +348,7 @@ local function candidates(r,mode)
         if dir.Magnitude>.1 then
             dir=dir.Unit
             local perp=Vector3.new(-dir.Z,0,dir.X)
-            for _,m in ipairs({.42,.58,.74,.88}) do
+            for _,m in ipairs({.48,.62,.78,.94,1.10,1.26}) do
                 for _,sgn in ipairs({-1,1}) do
                     local p=ground(q+perp*(r*m*sgn))
                     table.insert(out,{pos=p,score=score(p,r,mode,path,sp)})
@@ -283,7 +369,20 @@ local function chooseCard()
     end
     return best and best.c,cs,cash
 end
-local function currentCard(i) return cards()[i] end
+local function currentCard(i)
+    local cs=cards()
+    return cs[i]
+end
+local function modelsNear(p,r)
+    local out={}
+    for _,m in ipairs(workspace:GetDescendants()) do
+        if m:IsA("Model") and not playerCharacter(m) then
+            local q=modelPos(m)
+            if q and (q-p).Magnitude<=r and not enemyEvidence(m) then out[m]=true end
+        end
+    end
+    return out
+end
 local function place(c)
     if S.busy then return false,"another tower action is running" end
     S.busy=true
@@ -295,19 +394,25 @@ local function place(c)
     local opts=candidates(r,CFG.placementMode)
     if #opts==0 then return done(false,"learning pig path") end
     local before=c.current
-    for i=1,math.min(8,#opts) do
+    for i=1,math.min(14,#opts) do
         local p=opts[i].pos
         if nearestPlaced(p)>5 then
-            clickWorld(p); task.wait(.22)
+            local beforeModels=modelsNear(p,11)
+            clickWorld(p); task.wait(.30)
             local c2=currentCard(c.index)
-            if c2 and c2.current>before then
+            local placed=(c2 and c2.current>before) or false
+            if not placed then
+                for m in pairs(modelsNear(p,11)) do if not beforeModels[m] then placed=true break end end
+            end
+            if placed then
                 table.insert(S.placed,p)
                 S.placedBySlot[c.index]=(S.placedBySlot[c.index] or 0)+1
                 S.status.place=string.format("slot %d • %s • range %.0f",c.index,CFG.placementMode=="spawn" and "near spawner" or "smart",r)
                 return done(true)
             end
+            -- Keep the card selected for the next candidate; if the game cancelled placement, reselect it.
             local c3=currentCard(c.index)
-            if c3 then clickGui(c3.button) task.wait(.08) end
+            if c3 then clickGui(c3.button) task.wait(.10) end
         end
     end
     return done(false,"no accepted spot")
@@ -393,11 +498,12 @@ local dr=row(126)local dt=label(dr,"Learning...",10,C.text,Enum.Font.Code)dt.Pos
 task.spawn(function()
     while S.alive and sg.Parent do
         local _,conf=spawnPoint()
+        local es=enemies(); local en=0 for _ in pairs(es)do en+=1 end
         local rs={}for i,r in pairs(S.ranges)do table.insert(rs,string.format("S%d=%.0f",i,r))end table.sort(rs)
         active.Text=CFG.master and"● ACTIVE"or"● PAUSED"active.TextColor3=CFG.master and C.green or C.sub
         dt.Text=table.concat({
-            string.format("Money: %s    Pig path: %d samples    Spawn confidence: %d",tostring(money()),#S.path,conf),
-            string.format("Placement: %s    Ranges: %s",CFG.placementMode=="spawn"and"Near Spawner (80% range)"or"Smart coverage + spread",#rs>0 and table.concat(rs,"  ")or"learning / fallback "..CFG.rangeFallback),
+            string.format("Money: %s    Enemies: %d    Pig path: %d samples    Spawn confidence: %d",tostring(money()),en,#S.path,conf),
+            string.format("Placement: %s    Ranges: %s",CFG.placementMode=="spawn"and"Near Spawner (80% range)"or"Smart coverage + spread",#rs>0 and table.concat(rs,"  ")or tostring(S.status.range or ("learning / fallback "..CFG.rangeFallback))),
             "Waves: "..tostring(S.status.wave or"watching").."    Speed: "..tostring(S.status.speed or"watching"),
             "Placement: "..tostring(S.status.place or"learning").."    Cards: "..tostring(S.status.cards or"scanning"),
             "Upgrade: "..tostring(S.status.upgrade or"idle").."    Match: "..tostring(S.status.match or"active"),
