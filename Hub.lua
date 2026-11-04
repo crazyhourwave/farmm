@@ -1,7 +1,7 @@
 -- Hour Hub - Multi-Game Loader v1.0.0
 if not game:IsLoaded() then game.Loaded:Wait() end
 
-local VERSION="1.0.0"
+local VERSION="1.0.1"
 local RAW="https://raw.githubusercontent.com/crazyhourwave/farmm/main/"
 local PLACE=game.PlaceId
 local ROUTES={
@@ -11,11 +11,29 @@ local ROUTES={
 }
 
 local old=_G.HOUR_HUB
-if old and old.alive then pcall(function() if old.unload then old.unload() else old.alive=false end end) end
+if old and old.alive then
+    if type(old.toggleMenu)=="function" then
+        local ok=pcall(old.toggleMenu)
+        if ok then return end
+    end
+    pcall(function() if old.unload then old.unload() else old.alive=false end end)
+end
 
 local H={VERSION=VERSION,alive=true,place=PLACE,route=ROUTES[PLACE]}
 _G.HOUR_HUB=H
 
+function H.toggleMenu()
+    if _G.HOUR_ABTD and _G.HOUR_ABTD.alive and type(_G.HOUR_ABTD.toggleMenu)=="function" then
+        return _G.HOUR_ABTD.toggleMenu()
+    end
+    return false
+end
+function H.setMenuVisible(v)
+    if _G.HOUR_ABTD and _G.HOUR_ABTD.alive and type(_G.HOUR_ABTD.setMenuVisible)=="function" then
+        return _G.HOUR_ABTD.setMenuVisible(v)
+    end
+    return false
+end
 function H.unload()
     H.alive=false
     pcall(function() if _G.CKD_SF and _G.CKD_SF.unload then _G.CKD_SF.unload() end end)
