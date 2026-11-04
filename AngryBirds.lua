@@ -1,6 +1,6 @@
 -- Hour Hub - Angry Birds Tower Defense [BETA] v0.1.0
 if not game:IsLoaded() then game.Loaded:Wait() end
-local VERSION="0.6.0"
+local VERSION="0.6.1"
 if game.PlaceId~=95568014894521 then warn("[Hour Hub / ABTD] wrong place "..tostring(game.PlaceId)) return end
 
 local Players=game:GetService("Players")
@@ -799,12 +799,49 @@ local function learn()
     end
 end
 
+local function badGroundHit(inst)
+    if not inst then return false end
+    if LP.Character and inst:IsDescendantOf(LP.Character) then return true end
+    if inst:IsA("BasePart") then
+        local n=inst.Name:lower()
+        if n:find("range") or n:find("radius") or n:find("circle") or n:find("placement")
+            or n:find("preview") or n:find("ghost") or n:find("indicator") or n:find("selection") then
+            return true
+        end
+        if inst.Transparency>=0.72 or not inst.CanCollide then return true end
+    end
+    local m=inst:FindFirstAncestorOfClass("Model")
+    if m then
+        local n=m.Name:lower()
+        if n:find("preview") or n:find("ghost") or n:find("placement") then return true end
+    end
+    return false
+end
+
 local function ground(p)
-    local rp=RaycastParams.new()
-    rp.FilterType=Enum.RaycastFilterType.Exclude
-    rp.FilterDescendantsInstances=LP.Character and {LP.Character} or {}
-    local r=workspace:Raycast(p+Vector3.new(0,120,0),Vector3.new(0,-260,0),rp)
-    return r and r.Position or p
+    local excluded={}
+    if LP.Character then table.insert(excluded,LP.Character) end
+    local origin=p+Vector3.new(0,140,0)
+    local dir=Vector3.new(0,-320,0)
+    for _=1,14 do
+        local rp=RaycastParams.new()
+        rp.FilterType=Enum.RaycastFilterType.Exclude
+        rp.FilterDescendantsInstances=excluded
+        local r=workspace:Raycast(origin,dir,rp)
+        if not r then
+            S.status.ground="no ground hit"
+            return p
+        end
+        if badGroundHit(r.Instance) then
+            table.insert(excluded,r.Instance)
+            S.status.ground="skipped "..tostring(r.Instance.Name)
+        else
+            S.status.ground="ground "..tostring(r.Instance.Name)
+            return r.Position+Vector3.new(0,0.08,0)
+        end
+    end
+    S.status.ground="ground filter exhausted"
+    return p
 end
 local function previewRange()
     local best
@@ -827,6 +864,61 @@ local function nearestPlaced(p)
     local d=math.huge
     for _,q in ipairs(S.placed) do d=math.min(d,(p-q).Magnitude) end
     return d
+end
+
+local VALID_KEYS={valid=true,canplace=true,canbeplaced=true,placeable=true,isvalid=true,candeploy=true,allowed=true}
+local function colorVote(c)
+    if typeof(c)~="Color3" then return 0 end
+    if c.G>c.R*1.18 and c.G>c.B*0.85 then return 1 end
+    if c.R>c.G*1.18 and c.R>c.B*0.85 then return -1 end
+    return 0
+end
+local function previewValidity()
+    local score,evidence=0,0
+    for _,d in ipairs(workspace:GetDescendants()) do
+        local n=d.Name:lower():gsub("[^%w]","")
+        if VALID_KEYS[n] and d:IsA("BoolValue") then
+            evidence+=1
+            score+=d.Value and 6 or -6
+        end
+        if d:IsA("Highlight") then
+            local parentName=(d.Parent and d.Parent.Name or ""):lower()
+            local relevant=n:find("place") or n:find("preview") or n:find("ghost") or parentName:find("place") or parentName:find("preview") or parentName:find("ghost")
+            if relevant then
+                local v=colorVote(d.FillColor)+colorVote(d.OutlineColor)
+                if v~=0 then evidence+=1 score+=v*2 end
+            end
+        elseif d:IsA("BasePart") then
+            local relevant=n:find("place") or n:find("preview") or n:find("ghost") or n:find("indicator")
+            if relevant and d.Transparency<0.98 then
+                local v=colorVote(d.Color)
+                if v~=0 then evidence+=1 score+=v end
+            end
+        end
+        for k in pairs(VALID_KEYS) do
+            local ok,val=pcall(function() return d:GetAttribute(k) end)
+            if ok and type(val)=="boolean" then
+                evidence+=1
+                score+=val and 6 or -6
+            end
+        end
+    end
+    if evidence==0 then return nil,"unknown" end
+    if score>0 then return true,"valid "..tostring(score) end
+    if score<0 then return false,"invalid "..tostring(score) end
+    return nil,"mixed"
+end
+local function moveAndValidateCandidate(p)
+    local moved=select(1,movePlacementGhost(p,"screen"))
+    if not moved then moved=select(1,movePlacementGhost(p,"viewport")) end
+    if not moved then
+        S.status.preview="could not move ghost"
+        return nil
+    end
+    task.wait(.10)
+    local valid,why=previewValidity()
+    S.status.preview=(valid==true and "VALID • " or valid==false and "INVALID • " or "UNKNOWN • ")..tostring(why)
+    return valid
 end
 local function score(p,r,mode,path,sp)
     if #path<4 then return -1e9 end
@@ -1101,6 +1193,11 @@ local function place(c)
         local p=opts[i].pos
         if nearestPlaced(p)>5 then
             S.status.place=string.format("candidate %d/%d",i,math.min(18,#opts))
+            local previewOk=moveAndValidateCandidate(p)
+            if previewOk==false then
+                S.status.place=string.format("candidate %d invalid by ABTD preview",i)
+                continue
+            end
             local beforeModels=modelsNear(p,11)
             local function verifyPlaced()
                 local c2=currentCard(c.index)
@@ -1234,7 +1331,7 @@ sec("MASTER")toggle("Smart Hub","Master switch for Angry Birds automation","mast
 sec("WAVES")toggle("⚡ Auto Skip Next Wave","Presses the real SKIP TO NEXT WAVE button","autoSkip")toggle("▶ Auto Start","Presses START WAVE / READY when visible","autoStart")toggle("⏩ Auto 2X","Keeps the normal unlocked 2X selected","auto2x")toggle("🔁 Auto Continue / Replay","NEXT / CONTINUE / REPLAY after results","autoContinue")
 sec("TOWERS")toggle("🧠 Auto Place","Reads visible tower cards, costs and caps and places affordable towers","autoPlace")toggle("⬆ Auto Upgrade","Best-effort upgrades towers placed by the hub","autoUpgrade")toggle("🔄 Auto Merge","Best-effort merge/combine when exposed by the selected tower","autoMerge")
 sec("LIVE BRAIN")
-local dr=row(206)local dt=label(dr,"v0.6.0 booting • direct Mouse.Button1Down placement backend ready",10,C.text,Enum.Font.Code)dt.Position=UDim2.fromOffset(14,10)dt.Size=UDim2.new(1,-28,1,-20)dt.TextWrapped=true dt.TextYAlignment=Enum.TextYAlignment.Top
+local dr=row(222)local dt=label(dr,"v0.6.1 booting • preview-validated placement ready",10,C.text,Enum.Font.Code)dt.Position=UDim2.fromOffset(14,10)dt.Size=UDim2.new(1,-28,1,-20)dt.TextWrapped=true dt.TextYAlignment=Enum.TextYAlignment.Top
 task.spawn(function()
     while S.alive and sg.Parent do
         local _,conf=spawnPoint()
@@ -1246,6 +1343,8 @@ task.spawn(function()
             string.format("Placement: %s    Ranges: %s",CFG.placementMode=="spawn"and"Near Spawner (80% range)"or"Smart coverage + spread",#rs>0 and table.concat(rs,"  ")or tostring(S.status.range or ("learning / fallback "..CFG.rangeFallback))),
             "Waves: "..tostring(S.status.wave or"watching").."    Speed: "..tostring(S.status.speed or"watching"),
             "Placement: "..tostring(S.status.place or"learning").."    Cards: "..tostring(S.status.cards or"scanning"),
+            "Ground: "..tostring(S.status.ground or"scanning"),
+            "Preview: "..tostring(S.status.preview or"waiting"),
             "Click: "..tostring(S.status.click or"waiting"),
             "Mouse signal: "..tostring(S.status.mouseSignal or"armed"),
             "Controller: "..tostring(S.status.controller or"scanning loaded tower controllers"),
