@@ -1,6 +1,6 @@
 -- Hour Hub - Angry Birds Tower Defense [BETA] v0.1.0
 if not game:IsLoaded() then game.Loaded:Wait() end
-local VERSION="0.4.0"
+local VERSION="0.5.0"
 if game.PlaceId~=95568014894521 then warn("[Hour Hub / ABTD] wrong place "..tostring(game.PlaceId)) return end
 
 local Players=game:GetService("Players")
@@ -17,7 +17,7 @@ local Cam=workspace.CurrentCamera
 local old=_G.HOUR_ABTD
 if old and old.alive then pcall(function() if old.unload then old.unload() else old.alive=false end end) end
 
-local S={VERSION=VERSION,alive=true,busy=false,last={},tracks={},spawn={},path={},placed={},ranges={},placedBySlot={},status={},remoteCandidates={},remoteCalls={},manualPlacements={},placeRemote=nil,lastPlacementClickAt=0,lastPlacementWorld=nil}
+local S={VERSION=VERSION,alive=true,busy=false,last={},tracks={},spawn={},path={},placed={},ranges={},placedBySlot={},status={},remoteCandidates={},remoteCalls={},manualPlacements={},placeRemote=nil,controllerCandidates={},placeController=nil,lastPlacementClickAt=0,lastPlacementWorld=nil}
 _G.HOUR_ABTD=S
 
 local CFG={master=true,autoSkip=true,autoStart=true,auto2x=true,autoContinue=true,autoPlace=true,autoUpgrade=true,autoMerge=true,placementMode="smart",rangeFallback=30,placementInterval=.75,upgradeInterval=1.1}
@@ -871,17 +871,150 @@ local function modelsNear(p,r)
     end
     return out
 end
+
+local function keyNorm(k)
+    return tostring(k or ""):lower():gsub("[^%w]","")
+end
+local PLACE_KEY_SCORE={
+    placetower=140,placeunit=138,deploytower=136,deployunit=134,
+    place=125,deploy=122,spawnunit=118,spawntower=118,createunit=108,createtower=108,
+    confirmplacement=145,confirmplace=145,
+}
+local SIBLING_WORDS={upgrade=true,sell=true,target=true,targeting=true,rotate=true,cancel=true,merge=true}
+local function tableSiblingScore(t)
+    local n=0
+    for k,v in pairs(t) do
+        if type(v)=="function" and SIBLING_WORDS[keyNorm(k)] then n+=1 end
+    end
+    return n
+end
+local function addControllerCandidate(owner,k,fn,source,base)
+    if type(fn)~="function" or type(owner)~="table" then return end
+    local nk=keyNorm(k)
+    local ps=PLACE_KEY_SCORE[nk]
+    if not ps then return end
+    local sib=tableSiblingScore(owner)
+    local score=(base or 0)+ps+sib*18
+    for _,c in ipairs(S.controllerCandidates) do
+        if c.fn==fn then
+            if score>c.score then c.score=score c.owner=owner c.key=tostring(k) c.source=source c.siblings=sib end
+            return
+        end
+    end
+    table.insert(S.controllerCandidates,{owner=owner,key=tostring(k),fn=fn,source=source,score=score,siblings=sib})
+end
+local function scanControllerTable(t,source,depth,seen)
+    if type(t)~="table" or depth>2 then return end
+    seen=seen or {}
+    if seen[t] then return end
+    seen[t]=true
+    for k,v in pairs(t) do
+        if type(v)=="function" then
+            addControllerCandidate(t,k,v,source,depth==0 and 25 or 0)
+        elseif type(v)=="table" and depth<2 then
+            local nk=keyNorm(k)
+            if nk:find("tower",1,true) or nk:find("unit",1,true) or nk:find("place",1,true) or nk:find("deploy",1,true) or nk:find("controller",1,true) then
+                scanControllerTable(v,source.."."..tostring(k),depth+1,seen)
+            end
+        end
+    end
+end
+local function discoverTowerControllers()
+    S.controllerCandidates={}
+    local env=(getgenv and getgenv()) or _G
+    local glm=rawget(env,"getloadedmodules") or rawget(_G,"getloadedmodules")
+    if type(glm)=="function" then
+        local ok,mods=pcall(glm)
+        if ok and type(mods)=="table" then
+            for _,m in ipairs(mods) do
+                local name=""
+                pcall(function() name=tostring(m.Name) end)
+                local n=name:lower()
+                if n:find("tower") or n:find("unit") or n:find("place") or n:find("deploy") or n:find("controller") or n:find("bird") then
+                    local rok,val=pcall(require,m)
+                    if rok and type(val)=="table" then scanControllerTable(val,"module:"..name,0,{}) end
+                end
+            end
+        end
+    end
+
+    local ggc=rawget(env,"getgc") or rawget(_G,"getgc")
+    if type(ggc)=="function" then
+        local ok,objs=pcall(ggc,true)
+        if ok and type(objs)=="table" then
+            local scanned=0
+            for _,o in ipairs(objs) do
+                if type(o)=="table" then
+                    scanned+=1
+                    if scanned>35000 then break end
+                    local sib=tableSiblingScore(o)
+                    if sib>=1 then
+                        for k,v in pairs(o) do
+                            if type(v)=="function" and PLACE_KEY_SCORE[keyNorm(k)] then
+                                addControllerCandidate(o,k,v,"getgc",sib>=2 and 35 or 10)
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    table.sort(S.controllerCandidates,function(a,b)return a.score>b.score end)
+    S.placeController=S.controllerCandidates[1]
+    if S.placeController then
+        local c=S.placeController
+        S.status.controller=string.format("%s.%s • score %d • siblings %d",c.source,c.key,c.score,c.siblings or 0)
+    else
+        S.status.controller="none found"
+    end
+    return S.placeController
+end
+
+local function tryControllerPlacement(c,target,verify)
+    if not c or type(c.fn)~="function" then return false,"no controller" end
+    local cf=CFrame.new(target)
+    local variants={
+        {"self+Vector3",function() return c.fn(c.owner,target) end},
+        {"Vector3",function() return c.fn(target) end},
+        {"self+CFrame",function() return c.fn(c.owner,cf) end},
+        {"CFrame",function() return c.fn(cf) end},
+        {"self+Vector3+0",function() return c.fn(c.owner,target,0) end},
+        {"Vector3+0",function() return c.fn(target,0) end},
+        {"self+XYZ",function() return c.fn(c.owner,target.X,target.Y,target.Z) end},
+        {"XYZ",function() return c.fn(target.X,target.Y,target.Z) end},
+        {"self-only",function() return c.fn(c.owner) end},
+        {"no-args",function() return c.fn() end},
+    }
+    for _,v in ipairs(variants) do
+        local tag,call=v[1],v[2]
+        local ok,res=pcall(call)
+        if ok then
+            task.wait(.18)
+            local accepted=true
+            if type(verify)=="function" then
+                local vok,vres=pcall(verify)
+                accepted=vok and vres==true
+            end
+            S.status.controllerTry=c.key.." • "..tag.." • "..(accepted and "ACCEPTED" or "no placement")
+            if accepted then return true end
+        else
+            S.status.controllerTry=c.key.." • "..tag.." • "..tostring(res):sub(1,70)
+        end
+    end
+    return false,"controller variants rejected"
+end
 local function place(c)
     if S.busy then return false,"another tower action is running" end
-    if not S.placeRemote then
-        S.status.place="CALIBRATION: manually place 2 towers far apart"
-        return false,"waiting for two-point placement calibration"
-    end
 
     S.busy=true
     local function done(a,b) S.busy=false return a,b end
     if not clickGui(c.button) then return done(false,"card click failed") end
     task.wait(.10)
+
+    if not S.placeController and due("controllerDiscover",3) then
+        pcall(discoverTowerControllers)
+    end
 
     local r=previewRange() or S.ranges[c.index] or CFG.rangeFallback
     S.ranges[c.index]=r
@@ -892,28 +1025,45 @@ local function place(c)
     for i=1,math.min(18,#opts) do
         local p=opts[i].pos
         if nearestPlaced(p)>5 then
-            S.status.place=string.format("remote candidate %d/%d",i,math.min(18,#opts))
+            S.status.place=string.format("candidate %d/%d",i,math.min(18,#opts))
             local beforeModels=modelsNear(p,11)
-            local ok,err=replayLearned(S.placeRemote,p)
-            task.wait(.24)
+            local function verifyPlaced()
+                local c2=currentCard(c.index)
+                if c2 and c2.current>before then return true end
+                for m in pairs(modelsNear(p,11)) do if not beforeModels[m] then return true end end
+                return false
+            end
 
-            local c2=currentCard(c.index)
-            local placed=(c2 and c2.current>before) or false
-            if not placed then
-                for m in pairs(modelsNear(p,11)) do if not beforeModels[m] then placed=true break end end
+            local placed=false
+            if S.placeController then
+                placed=select(1,tryControllerPlacement(S.placeController,p,verifyPlaced))
+                if placed then S.status.click="CONTROLLER • ACCEPTED • "..S.placeController.key end
+            end
+
+            if not placed and S.placeRemote then
+                local ok,err=replayLearned(S.placeRemote,p)
+                task.wait(.20)
+                placed=verifyPlaced()
+                if placed then
+                    S.status.click="REMOTE • ACCEPTED • "..S.placeRemote.full.." • "..tostring(S.placeRemote.mapping and S.placeRemote.mapping.type)
+                elseif err then S.status.click="remote rejected • "..tostring(err) end
             end
 
             if placed then
                 table.insert(S.placed,p)
                 S.placedBySlot[c.index]=(S.placedBySlot[c.index] or 0)+1
-                S.status.click="REMOTE • ACCEPTED • "..S.placeRemote.full.." • "..tostring(S.placeRemote.mapping and S.placeRemote.mapping.type)
                 S.status.place=string.format("slot %d • %s • range %.0f",c.index,CFG.placementMode=="spawn" and "near spawner" or "smart",r)
                 return done(true)
             end
-            S.status.click="remote rejected candidate "..tostring(i)..(err and (" • "..tostring(err)) or "")
         end
     end
-    return done(false,"placement remote rejected every candidate")
+
+    if not S.placeController and not S.placeRemote then
+        S.status.place="no place controller/remote yet • manual calibration remains armed"
+    else
+        S.status.place="all controller/remote candidates rejected"
+    end
+    return done(false,"no accepted placement path")
 end
 local function upgrade()
     if S.busy then return false end
@@ -934,6 +1084,7 @@ task.spawn(function()
     while S.alive do
         pcall(learn)
         if due("remoteScan",5) then pcall(likelyPlacementRemotes) end
+        if due("controllerScan",6) then pcall(discoverTowerControllers) end
         local now=cardSnapshot()
         pcall(learnRemoteFromPlacement,prev,now)
         prev=now
@@ -1003,7 +1154,7 @@ sec("MASTER")toggle("Smart Hub","Master switch for Angry Birds automation","mast
 sec("WAVES")toggle("⚡ Auto Skip Next Wave","Presses the real SKIP TO NEXT WAVE button","autoSkip")toggle("▶ Auto Start","Presses START WAVE / READY when visible","autoStart")toggle("⏩ Auto 2X","Keeps the normal unlocked 2X selected","auto2x")toggle("🔁 Auto Continue / Replay","NEXT / CONTINUE / REPLAY after results","autoContinue")
 sec("TOWERS")toggle("🧠 Auto Place","Reads visible tower cards, costs and caps and places affordable towers","autoPlace")toggle("⬆ Auto Upgrade","Best-effort upgrades towers placed by the hub","autoUpgrade")toggle("🔄 Auto Merge","Best-effort merge/combine when exposed by the selected tower","autoMerge")
 sec("LIVE BRAIN")
-local dr=row(166)local dt=label(dr,"v0.4.0 booting • two-placement calibration ready",10,C.text,Enum.Font.Code)dt.Position=UDim2.fromOffset(14,10)dt.Size=UDim2.new(1,-28,1,-20)dt.TextWrapped=true dt.TextYAlignment=Enum.TextYAlignment.Top
+local dr=row(190)local dt=label(dr,"v0.5.0 booting • tower-controller discovery ready",10,C.text,Enum.Font.Code)dt.Position=UDim2.fromOffset(14,10)dt.Size=UDim2.new(1,-28,1,-20)dt.TextWrapped=true dt.TextYAlignment=Enum.TextYAlignment.Top
 task.spawn(function()
     while S.alive and sg.Parent do
         local _,conf=spawnPoint()
@@ -1016,6 +1167,8 @@ task.spawn(function()
             "Waves: "..tostring(S.status.wave or"watching").."    Speed: "..tostring(S.status.speed or"watching"),
             "Placement: "..tostring(S.status.place or"learning").."    Cards: "..tostring(S.status.cards or"scanning"),
             "Click: "..tostring(S.status.click or"waiting"),
+            "Controller: "..tostring(S.status.controller or"scanning loaded tower controllers"),
+            "Controller try: "..tostring(S.status.controllerTry or"waiting"),
             "Placement remotes: "..tostring(S.status.remotes or"scanning"),
             "Remote learner: "..tostring(S.status.remoteLearn or"arming"),
             "Upgrade: "..tostring(S.status.upgrade or"idle").."    Match: "..tostring(S.status.match or"active"),
