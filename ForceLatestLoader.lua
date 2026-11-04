@@ -3,27 +3,38 @@
 
 if not game:IsLoaded() then game.Loaded:Wait() end
 
--- Menu-toggle behavior: current build = hide/show. Outdated build = upgrade first.
+-- Menu-toggle behavior: current build = hide/show. Outdated/broken build = reload.
 local EXPECT_ABTD="0.2.4"
 local legacyAbShouldHide=false
 do
-    local ab=rawget(_G,"HOUR_ABTD")
-    local abStale=game.PlaceId==95568014894521 and ab and ab.alive and tostring(ab.VERSION)~=EXPECT_ABTD
+    if game.PlaceId==95568014894521 then
+        local ab=rawget(_G,"HOUR_ABTD")
+        local current=ab and ab.alive and tostring(ab.VERSION)==EXPECT_ABTD
+        local pg=game:GetService("Players").LocalPlayer:FindFirstChildOfClass("PlayerGui")
+        local gui=pg and pg:FindFirstChild("HourHub_ABTD")
 
-    if not abStale then
+        if current and gui and gui:IsA("ScreenGui") then
+            -- Toggle the real ScreenGui directly. This does not depend on hub/global delegation.
+            gui.Enabled=not gui.Enabled
+            print("[Hour Hub] ABTD menu "..(gui.Enabled and "OPENED" or "CLOSED").." directly")
+            return
+        end
+
+        if ab and ab.alive and not current then
+            print("[Hour Hub] ABTD v"..tostring(ab.VERSION).." is outdated; upgrading to v"..EXPECT_ABTD)
+        elseif current and not gui then
+            -- Module survived but its UI did not. Reload instead of silently returning.
+            warn("[Hour Hub] ABTD module is alive but its menu is missing; rebuilding UI")
+        elseif ab and ab.alive then
+            legacyAbShouldHide=true
+        end
+    else
+        -- Other games can still delegate to their module-specific menu API.
         local h=rawget(_G,"HOUR_HUB")
         if h and h.alive and type(h.toggleMenu)=="function" then
             local ok=pcall(h.toggleMenu)
             if ok then return end
         end
-        if ab and ab.alive and type(ab.toggleMenu)=="function" then
-            local ok=pcall(ab.toggleMenu)
-            if ok then return end
-        elseif ab and ab.alive then
-            legacyAbShouldHide=true
-        end
-    else
-        print("[Hour Hub] ABTD v"..tostring(ab.VERSION).." is outdated; upgrading to v"..EXPECT_ABTD)
     end
 end
 
