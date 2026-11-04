@@ -335,7 +335,7 @@ do
             pcall(function() className=self.ClassName end)
             if S.alive and (method=="FireServer" or method=="InvokeServer")
                 and (className=="RemoteEvent" or className=="RemoteFunction")
-                and os.clock()-(S.lastPlacementClickAt or 0)<1.25 then
+                and os.clock()-(S.lastPlacementClickAt or 0)<2.0 then
 
                 local pack=table.pack(...)
                 local nodes={}
@@ -367,14 +367,16 @@ do
             return oldNamecall(self,...)
         end))
         S._oldNamecall=oldNamecall
-        S.status.remoteLearn="armed • place ONE tower manually"
+        S.status.remoteLearn="ARMED • manually place ONE tower once"
     else
         S.status.remoteLearn="executor lacks hookmetamethod"
     end
 end
 
 UIS.InputBegan:Connect(function(i,gp)
-    if i.UserInputType==Enum.UserInputType.MouseButton1 and placementUiActive() then
+    if i.UserInputType==Enum.UserInputType.MouseButton1 then
+        -- Record every manual world click. We only promote a captured remote after a tower-card
+        -- counter actually increases, so unrelated clicks/remotes are ignored automatically.
         S.lastPlacementClickAt=os.clock()
         pcall(function() S.lastPlacementWorld=LP:GetMouse().Hit.Position end)
     end
