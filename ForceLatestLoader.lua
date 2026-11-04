@@ -3,24 +3,27 @@
 
 if not game:IsLoaded() then game.Loaded:Wait() end
 
--- Menu-toggle behavior: if Hour Hub is already active, executing this loader again only
--- hides/shows the current menu. Automation keeps running in the background.
+-- Menu-toggle behavior: current build = hide/show. Outdated build = upgrade first.
+local EXPECT_ABTD="0.2.2"
 local legacyAbShouldHide=false
 do
-    local h=rawget(_G,"HOUR_HUB")
-    if h and h.alive and type(h.toggleMenu)=="function" then
-        local ok=pcall(h.toggleMenu)
-        if ok then return end
-    end
-    -- Compatibility with an older ABTD module already running before v0.2.1.
     local ab=rawget(_G,"HOUR_ABTD")
-    if ab and ab.alive and type(ab.toggleMenu)=="function" then
-        local ok=pcall(ab.toggleMenu)
-        if ok then return end
-    elseif ab and ab.alive then
-        -- Upgrade the legacy module below, but preserve the user's intent: this re-execution
-        -- should CLOSE the menu, not replace it with another visible copy.
-        legacyAbShouldHide=true
+    local abStale=game.PlaceId==95568014894521 and ab and ab.alive and tostring(ab.VERSION)~=EXPECT_ABTD
+
+    if not abStale then
+        local h=rawget(_G,"HOUR_HUB")
+        if h and h.alive and type(h.toggleMenu)=="function" then
+            local ok=pcall(h.toggleMenu)
+            if ok then return end
+        end
+        if ab and ab.alive and type(ab.toggleMenu)=="function" then
+            local ok=pcall(ab.toggleMenu)
+            if ok then return end
+        elseif ab and ab.alive then
+            legacyAbShouldHide=true
+        end
+    else
+        print("[Hour Hub] ABTD v"..tostring(ab.VERSION).." is outdated; upgrading to v"..EXPECT_ABTD)
     end
 end
 
