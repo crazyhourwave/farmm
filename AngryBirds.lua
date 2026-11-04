@@ -1,6 +1,6 @@
 -- Hour Hub - Angry Birds Tower Defense [BETA] v0.1.0
 if not game:IsLoaded() then game.Loaded:Wait() end
-local VERSION="0.3.1"
+local VERSION="0.3.2"
 if game.PlaceId~=95568014894521 then warn("[Hour Hub / ABTD] wrong place "..tostring(game.PlaceId)) return end
 
 local Players=game:GetService("Players")
@@ -187,20 +187,62 @@ end
 
 local function collectPositionNodes(v,path,out,depth,seen)
     depth=depth or 0
-    if depth>5 then return end
+    if depth>6 then return end
     local tv=typeof(v)
     if tv=="Vector3" then
         table.insert(out,{path=path,pos=v,kind="Vector3"})
+        return
     elseif tv=="CFrame" then
         table.insert(out,{path=path,pos=v.Position,kind="CFrame"})
-    elseif type(v)=="table" then
-        seen=seen or {}
-        if seen[v] then return end
-        seen[v]=true
-        for k,x in pairs(v) do
-            local p=table.clone(path)
-            table.insert(p,k)
-            collectPositionNodes(x,p,out,depth+1,seen)
+        return
+    elseif type(v)~="table" then
+        return
+    end
+
+    seen=seen or {}
+    if seen[v] then return end
+    seen[v]=true
+
+    -- Common serialized position tables: {X=,Y=,Z=} / {x=,y=,z=}.
+    local X=v.X~=nil and v.X or v.x
+    local Y=v.Y~=nil and v.Y or v.y
+    local Z=v.Z~=nil and v.Z or v.z
+    if type(X)=="number" and type(Y)=="number" and type(Z)=="number" then
+        table.insert(out,{path=path,pos=Vector3.new(X,Y,Z),kind="TableXYZ",
+            keys={v.X~=nil and "X" or "x",v.Y~=nil and "Y" or "y",v.Z~=nil and "Z" or "z"}})
+    end
+
+    -- Numeric array serialization: {x, y, z}.
+    if type(v[1])=="number" and type(v[2])=="number" and type(v[3])=="number" then
+        table.insert(out,{path=path,pos=Vector3.new(v[1],v[2],v[3]),kind="ArrayXYZ",keys={1,2,3}})
+    end
+
+    for k,x in pairs(v) do
+        local p=table.clone(path)
+        table.insert(p,k)
+        collectPositionNodes(x,p,out,depth+1,seen)
+    end
+end
+
+local function collectTopLevelNumericPositions(pack,out,ref)
+    if not ref then return end
+    -- Raw x,y,z arguments.
+    for i=1,pack.n-2 do
+        if type(pack[i])=="number" and type(pack[i+1])=="number" and type(pack[i+2])=="number" then
+            local p=Vector3.new(pack[i],pack[i+1],pack[i+2])
+            if (p-ref).Magnitude<120 then
+                table.insert(out,{kind="ArgsXYZ",pos=p,argIndices={i,i+1,i+2},path={}})
+            end
+        end
+    end
+    -- Raw x,z arguments with server-derived height.
+    for i=1,pack.n-1 do
+        if type(pack[i])=="number" and type(pack[i+1])=="number" then
+            local p=Vector3.new(pack[i],ref.Y,pack[i+1])
+            local dxz=Vector2.new(p.X-ref.X,p.Z-ref.Z).Magnitude
+            if dxz<120 then
+                table.insert(out,{kind="ArgsXZ",pos=p,argIndices={i,i+1},path={}})
+            end
         end
     end
 end
@@ -214,10 +256,17 @@ local function cloneValue(v,depth,seen)
     for k,x in pairs(v) do o[cloneValue(k,depth+1,seen)]=cloneValue(x,depth+1,seen) end
     return o
 end
-local function setAtPath(root,path,target)
+local function setAtPath(root,path,target,kind,keys)
     if #path==0 then
         if typeof(root)=="Vector3" then return target end
         if typeof(root)=="CFrame" then return CFrame.new(target)*(root-root.Position) end
+        if type(root)=="table" and (kind=="TableXYZ" or kind=="ArrayXYZ") and keys then
+            local out=cloneValue(root)
+            out[keys[1]]=target.X
+            out[keys[2]]=target.Y
+            out[keys[3]]=target.Z
+            return out
+        end
         return root
     end
     if type(root)~="table" then return root end
@@ -230,15 +279,36 @@ local function setAtPath(root,path,target)
     end
     local k=path[#path]
     local old=cur[k]
-    if typeof(old)=="Vector3" then cur[k]=target
-    elseif typeof(old)=="CFrame" then cur[k]=CFrame.new(target)*(old-old.Position) end
+    if typeof(old)=="Vector3" then
+        cur[k]=target
+    elseif typeof(old)=="CFrame" then
+        cur[k]=CFrame.new(target)*(old-old.Position)
+    elseif type(old)=="table" and (kind=="TableXYZ" or kind=="ArrayXYZ") and keys then
+        local tbl=cloneValue(old)
+        tbl[keys[1]]=target.X
+        tbl[keys[2]]=target.Y
+        tbl[keys[3]]=target.Z
+        cur[k]=tbl
+    end
     return out
 end
 local function argsForTarget(tpl,target)
     local out=table.create(tpl.args.n)
     for i=1,tpl.args.n do out[i]=cloneValue(tpl.args[i]) end
+
+    if tpl.kind=="ArgsXYZ" and tpl.argIndices then
+        out[tpl.argIndices[1]]=target.X
+        out[tpl.argIndices[2]]=target.Y
+        out[tpl.argIndices[3]]=target.Z
+        return out,tpl.args.n
+    elseif tpl.kind=="ArgsXZ" and tpl.argIndices then
+        out[tpl.argIndices[1]]=target.X
+        out[tpl.argIndices[2]]=target.Z
+        return out,tpl.args.n
+    end
+
     local root=out[tpl.argIndex]
-    out[tpl.argIndex]=setAtPath(root,tpl.path,target)
+    out[tpl.argIndex]=setAtPath(root,tpl.path,target,tpl.kind,tpl.keys)
     return out,tpl.args.n
 end
 local function firePlacementRemote(tpl,target)
@@ -270,6 +340,7 @@ do
                 local pack=table.pack(...)
                 local nodes={}
                 for i=1,pack.n do collectPositionNodes(pack[i],{i},nodes,0,{}) end
+                collectTopLevelNumericPositions(pack,nodes,S.lastPlacementWorld)
                 if #nodes>0 then
                     local ref=S.lastPlacementWorld
                     local best,bd
@@ -278,10 +349,14 @@ do
                         if not bd or d<bd then best,bd=node,d end
                     end
                     if best and (not ref or bd<90) then
-                        local p=table.clone(best.path)
-                        local argIndex=table.remove(p,1)
+                        local p=table.clone(best.path or {})
+                        local argIndex
+                        if best.kind~="ArgsXYZ" and best.kind~="ArgsXZ" then
+                            argIndex=table.remove(p,1)
+                        end
                         table.insert(S.remoteCandidates,{
                             remote=self,method=method,args=cloneValue(pack),argIndex=argIndex,path=p,
+                            kind=best.kind,keys=best.keys,argIndices=best.argIndices,
                             at=os.clock(),distance=bd or 0,name=tostring(self.Name),
                         })
                         while #S.remoteCandidates>12 do table.remove(S.remoteCandidates,1) end
@@ -598,7 +673,7 @@ local function learnRemoteFromPlacement(before,after)
             pcall(function() full=c.remote:GetFullName() end)
             c.full=full
             S.placeRemote=c
-            S.status.remoteLearn="LEARNED "..full.." • slot "..tostring(changed)
+            S.status.remoteLearn="LEARNED "..full.." • "..tostring(c.kind).." • slot "..tostring(changed)
             print("[Hour Hub] learned ABTD placement remote: "..full)
             return
         end
@@ -664,7 +739,7 @@ local function place(c)
             if placed then
                 table.insert(S.placed,p)
                 S.placedBySlot[c.index]=(S.placedBySlot[c.index] or 0)+1
-                S.status.click="REMOTE • ACCEPTED • "..S.placeRemote.full
+                S.status.click="REMOTE • ACCEPTED • "..S.placeRemote.full.." • "..tostring(S.placeRemote.kind)
                 S.status.place=string.format("slot %d • %s • range %.0f",c.index,CFG.placementMode=="spawn" and "near spawner" or "smart",r)
                 return done(true)
             end
