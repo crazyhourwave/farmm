@@ -1,6 +1,6 @@
 -- Hour Hub - Angry Birds Tower Defense [BETA] v0.1.0
 if not game:IsLoaded() then game.Loaded:Wait() end
-local VERSION="0.2.1"
+local VERSION="0.2.2"
 if game.PlaceId~=95568014894521 then warn("[Hour Hub / ABTD] wrong place "..tostring(game.PlaceId)) return end
 
 local Players=game:GetService("Players")
@@ -81,17 +81,38 @@ end
 local function clickWorld(p)
     Cam=workspace.CurrentCamera or Cam
     if not Cam then return false end
-    local v,on=Cam:WorldToViewportPoint(p)
-    if not on or v.Z<=0 then return false end
-    return pcall(function()
-        -- ABTD updates its placement ghost from the live mouse position. Move first, give the
-        -- preview a couple frames to settle, THEN confirm with the click.
+
+    -- VirtualInputManager uses desktop/screen mouse coordinates. WorldToViewportPoint omits the
+    -- Roblox top-bar inset, which can leave the ghost in one place and confirm the click somewhere else.
+    local okScreen,v,on=pcall(function()
+        local q,visible=Cam:WorldToScreenPoint(p)
+        return q,visible
+    end)
+    if not okScreen or not v then
+        v,on=Cam:WorldToViewportPoint(p)
+    end
+    if not on or v.Z<=0 then
+        S.status.click="candidate off-screen"
+        return false
+    end
+
+    local hub=PG:FindFirstChild("HourHub_ABTD")
+    local wasEnabled=hub and hub.Enabled
+    if hub then hub.Enabled=false end -- never let our own menu eat a world-placement click
+
+    local ok,err=pcall(function()
         VIM:SendMouseMoveEvent(v.X,v.Y,game)
-        task.wait(.09)
+        task.wait(.14) -- give ABTD's ghost/range preview time to follow Mouse.Hit
         VIM:SendMouseButtonEvent(v.X,v.Y,0,true,game,0)
-        task.wait(.06)
+        task.wait(.07)
         VIM:SendMouseButtonEvent(v.X,v.Y,0,false,game,0)
     end)
+
+    task.wait(.04)
+    if hub and hub.Parent then hub.Enabled=wasEnabled~=false end
+
+    S.status.click=string.format("screen %.0f,%.0f • %s",v.X,v.Y,ok and "clicked" or ("input error: "..tostring(err)))
+    return ok
 end
 local function due(k,sec)
     local n=os.clock()
@@ -397,19 +418,25 @@ local function place(c)
     for i=1,math.min(14,#opts) do
         local p=opts[i].pos
         if nearestPlaced(p)>5 then
+            S.status.place=string.format("trying candidate %d/%d",i,math.min(14,#opts))
             local beforeModels=modelsNear(p,11)
-            clickWorld(p); task.wait(.30)
+            local sent=clickWorld(p); task.wait(.34)
+            if not sent then
+                S.status.place="world click failed • candidate "..tostring(i)
+            end
             local c2=currentCard(c.index)
             local placed=(c2 and c2.current>before) or false
             if not placed then
                 for m in pairs(modelsNear(p,11)) do if not beforeModels[m] then placed=true break end end
             end
             if placed then
+                S.status.click=(S.status.click or "clicked").." • ACCEPTED"
                 table.insert(S.placed,p)
                 S.placedBySlot[c.index]=(S.placedBySlot[c.index] or 0)+1
                 S.status.place=string.format("slot %d • %s • range %.0f",c.index,CFG.placementMode=="spawn" and "near spawner" or "smart",r)
                 return done(true)
             end
+            S.status.click=(S.status.click or "clicked").." • rejected"
             -- Keep the card selected for the next candidate; if the game cancelled placement, reselect it.
             local c3=currentCard(c.index)
             if c3 then clickGui(c3.button) task.wait(.10) end
@@ -507,6 +534,7 @@ task.spawn(function()
             string.format("Placement: %s    Ranges: %s",CFG.placementMode=="spawn"and"Near Spawner (80% range)"or"Smart coverage + spread",#rs>0 and table.concat(rs,"  ")or tostring(S.status.range or ("learning / fallback "..CFG.rangeFallback))),
             "Waves: "..tostring(S.status.wave or"watching").."    Speed: "..tostring(S.status.speed or"watching"),
             "Placement: "..tostring(S.status.place or"learning").."    Cards: "..tostring(S.status.cards or"scanning"),
+            "Click: "..tostring(S.status.click or"waiting"),
             "Upgrade: "..tostring(S.status.upgrade or"idle").."    Match: "..tostring(S.status.match or"active"),
         },"\n")
         task.wait(.35)
