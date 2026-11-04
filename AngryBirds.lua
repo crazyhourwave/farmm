@@ -261,9 +261,11 @@ do
         local oldNamecall
         oldNamecall=hookmm(game,"__namecall",ncc(function(self,...)
             local method=getncm()
+            local className
+            pcall(function() className=self.ClassName end)
             if S.alive and (method=="FireServer" or method=="InvokeServer")
-                and (self:IsA("RemoteEvent") or self:IsA("RemoteFunction"))
-                and (placementUiActive() or os.clock()-(S.lastPlacementClickAt or 0)<1.25) then
+                and (className=="RemoteEvent" or className=="RemoteFunction")
+                and os.clock()-(S.lastPlacementClickAt or 0)<1.25 then
 
                 local pack=table.pack(...)
                 local nodes={}
@@ -280,10 +282,10 @@ do
                         local argIndex=table.remove(p,1)
                         table.insert(S.remoteCandidates,{
                             remote=self,method=method,args=cloneValue(pack),argIndex=argIndex,path=p,
-                            at=os.clock(),distance=bd or 0,full=self:GetFullName(),
+                            at=os.clock(),distance=bd or 0,name=tostring(self.Name),
                         })
                         while #S.remoteCandidates>12 do table.remove(S.remoteCandidates,1) end
-                        S.status.remoteLearn="candidate "..self:GetFullName()
+                        S.status.remoteLearn="captured candidate "..tostring(self.Name)
                     end
                 end
             end
@@ -592,9 +594,12 @@ local function learnRemoteFromPlacement(before,after)
     for i=#S.remoteCandidates,1,-1 do
         local c=S.remoteCandidates[i]
         if now-c.at<2.0 then
+            local full=c.name or "remote"
+            pcall(function() full=c.remote:GetFullName() end)
+            c.full=full
             S.placeRemote=c
-            S.status.remoteLearn="LEARNED "..c.full.." • slot "..tostring(changed)
-            print("[Hour Hub] learned ABTD placement remote: "..c.full)
+            S.status.remoteLearn="LEARNED "..full.." • slot "..tostring(changed)
+            print("[Hour Hub] learned ABTD placement remote: "..full)
             return
         end
     end
