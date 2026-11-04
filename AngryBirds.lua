@@ -1,6 +1,6 @@
 -- Hour Hub - Angry Birds Tower Defense [BETA] v0.1.0
 if not game:IsLoaded() then game.Loaded:Wait() end
-local VERSION="0.3.2"
+local VERSION="0.4.0"
 if game.PlaceId~=95568014894521 then warn("[Hour Hub / ABTD] wrong place "..tostring(game.PlaceId)) return end
 
 local Players=game:GetService("Players")
@@ -17,7 +17,7 @@ local Cam=workspace.CurrentCamera
 local old=_G.HOUR_ABTD
 if old and old.alive then pcall(function() if old.unload then old.unload() else old.alive=false end end) end
 
-local S={VERSION=VERSION,alive=true,busy=false,last={},tracks={},spawn={},path={},placed={},ranges={},placedBySlot={},status={},remoteCandidates={},placeRemote=nil,lastPlacementClickAt=0,lastPlacementWorld=nil}
+local S={VERSION=VERSION,alive=true,busy=false,last={},tracks={},spawn={},path={},placed={},ranges={},placedBySlot={},status={},remoteCandidates={},remoteCalls={},manualPlacements={},placeRemote=nil,lastPlacementClickAt=0,lastPlacementWorld=nil}
 _G.HOUR_ABTD=S
 
 local CFG={master=true,autoSkip=true,autoStart=true,auto2x=true,autoContinue=true,autoPlace=true,autoUpgrade=true,autoMerge=true,placementMode="smart",rangeFallback=30,placementInterval=.75,upgradeInterval=1.1}
@@ -321,7 +321,189 @@ local function firePlacementRemote(tpl,target)
     return ok and res==true,ok and nil or res
 end
 
--- Capture the actual placement remote/argument shape from ONE real manual placement.
+-- Two-placement calibration.
+-- We capture every outgoing remote call for a short window around a manual placement, then only keep
+-- the calls that coincide with an actual tower-card counter increase. After TWO placements at different
+-- positions, we diff the calls and discover which argument fields move like world X/Y/Z.
+local function flattenLeaves(v,path,out,depth,seen)
+    depth=depth or 0
+    if depth>7 then return end
+    local tv=typeof(v)
+    if tv=="Vector3" then
+        table.insert(out,{path=path,kind="Vector3",value=v})
+        return
+    elseif tv=="CFrame" then
+        table.insert(out,{path=path,kind="CFrame",value=v})
+        return
+    elseif type(v)=="number" then
+        table.insert(out,{path=path,kind="number",value=v})
+        return
+    elseif type(v)~="table" then
+        return
+    end
+    seen=seen or {}
+    if seen[v] then return end
+    seen[v]=true
+    for k,x in pairs(v) do
+        local p=table.clone(path)
+        table.insert(p,k)
+        flattenLeaves(x,p,out,depth+1,seen)
+    end
+end
+
+local function pathKey(path)
+    local a={}
+    for _,k in ipairs(path) do table.insert(a,tostring(k)) end
+    return table.concat(a,"/")
+end
+
+local function setLeaf(root,path,value)
+    if #path==0 then return value end
+    if type(root)~="table" then return root end
+    local out=cloneValue(root)
+    local cur=out
+    for i=1,#path-1 do
+        local k=path[i]
+        if type(cur[k])~="table" then return out end
+        cur=cur[k]
+    end
+    cur[path[#path]]=value
+    return out
+end
+
+local function setArgPath(args,path,value)
+    local out=table.create(args.n)
+    for i=1,args.n do out[i]=cloneValue(args[i]) end
+    local argIndex=path[1]
+    local sub={}
+    for i=2,#path do sub[#sub+1]=path[i] end
+    if #sub==0 then out[argIndex]=value
+    else out[argIndex]=setLeaf(out[argIndex],sub,value) end
+    return out
+end
+
+local function sameCall(a,b)
+    return a.remote==b.remote and a.method==b.method and a.args.n==b.args.n
+end
+
+local function inferMapping(a,b,p1,p2)
+    if not sameCall(a,b) then return nil end
+    local la,lb={},{}
+    for i=1,a.args.n do flattenLeaves(a.args[i],{i},la,0,{}) end
+    for i=1,b.args.n do flattenLeaves(b.args[i],{i},lb,0,{}) end
+    local mb={}
+    for _,x in ipairs(lb) do mb[pathKey(x.path)]=x end
+
+    local delta=p2-p1
+    local bestVec
+    local nums={}
+    for _,x in ipairs(la) do
+        local y=mb[pathKey(x.path)]
+        if y and y.kind==x.kind then
+            if x.kind=="Vector3" or x.kind=="CFrame" then
+                local va=x.kind=="CFrame" and x.value.Position or x.value
+                local vb=y.kind=="CFrame" and y.value.Position or y.value
+                local err=((vb-va)-delta).Magnitude
+                if not bestVec or err<bestVec.err then
+                    bestVec={kind=x.kind,path=x.path,err=err,base=y.value,offset=vb-p2}
+                end
+            elseif x.kind=="number" then
+                table.insert(nums,{path=x.path,a=x.value,b=y.value,d=y.value-x.value})
+            end
+        end
+    end
+    if bestVec and bestVec.err<8 then
+        return {type=bestVec.kind,path=bestVec.path,offset=bestVec.offset,score=100-bestVec.err,base=bestVec.base}
+    end
+
+    local axes={X=delta.X,Y=delta.Y,Z=delta.Z}
+    local chosen,score={},0
+    local used={}
+    for _,axis in ipairs({"X","Y","Z"}) do
+        local target=axes[axis]
+        local best
+        for _,n in ipairs(nums) do
+            local k=pathKey(n.path)
+            if not used[k] then
+                local err=math.abs(n.d-target)
+                if not best or err<best.err then best={n=n,err=err,key=k} end
+            end
+        end
+        if best and best.err<6 then
+            chosen[axis]=best.n
+            used[best.key]=true
+            score+=30-best.err
+        end
+    end
+    if chosen.X and chosen.Z then
+        local offsets={}
+        offsets.X=chosen.X.b-p2.X
+        offsets.Z=chosen.Z.b-p2.Z
+        if chosen.Y then offsets.Y=chosen.Y.b-p2.Y end
+        return {type="NumericAxes",axes=chosen,offsets=offsets,score=score}
+    end
+end
+
+local function replayLearned(tpl,target)
+    if not tpl or not tpl.call then return false,"no learned call" end
+    local args=table.pack(table.unpack(tpl.call.args,1,tpl.call.args.n))
+    for i=1,args.n do args[i]=cloneValue(args[i]) end
+
+    if tpl.mapping.type=="Vector3" or tpl.mapping.type=="CFrame" then
+        local pos=target+tpl.mapping.offset
+        local value=tpl.mapping.type=="Vector3" and pos or CFrame.new(pos)
+        if tpl.mapping.type=="CFrame" and typeof(tpl.mapping.base)=="CFrame" then
+            value=CFrame.new(pos)*(tpl.mapping.base-tpl.mapping.base.Position)
+        end
+        args=setArgPath(args,tpl.mapping.path,value)
+        args.n=tpl.call.args.n
+    else
+        for axis,node in pairs(tpl.mapping.axes) do
+            local v=(axis=="X" and target.X or axis=="Y" and target.Y or target.Z)+(tpl.mapping.offsets[axis] or 0)
+            args=setArgPath(args,node.path,v)
+            args.n=tpl.call.args.n
+        end
+    end
+
+    local ok,res=pcall(function()
+        if tpl.call.method=="FireServer" then tpl.call.remote:FireServer(table.unpack(args,1,args.n)); return true end
+        tpl.call.remote:InvokeServer(table.unpack(args,1,args.n)); return true
+    end)
+    return ok and res==true,ok and nil or res
+end
+
+local function tryBuildTwoPointCalibration()
+    if S.placeRemote or #S.manualPlacements<2 then return end
+    local e1=S.manualPlacements[#S.manualPlacements-1]
+    local e2=S.manualPlacements[#S.manualPlacements]
+    if not e1.pos or not e2.pos or (e2.pos-e1.pos).Magnitude<8 then
+        S.status.remoteLearn="need 2nd manual tower farther away"
+        return
+    end
+
+    local best
+    for _,a in ipairs(e1.calls) do
+        for _,b in ipairs(e2.calls) do
+            local mapping=inferMapping(a,b,e1.pos,e2.pos)
+            if mapping then
+                local score=mapping.score or 0
+                if not best or score>best.score then best={call=b,mapping=mapping,score=score} end
+            end
+        end
+    end
+
+    if best then
+        local full=tostring(best.call.name or "remote")
+        pcall(function() full=best.call.remote:GetFullName() end)
+        best.full=full
+        S.placeRemote=best
+        S.status.remoteLearn="LEARNED "..full.." • "..best.mapping.type
+        print("[Hour Hub] two-point placement calibration learned: "..full.." • "..best.mapping.type)
+    else
+        S.status.remoteLearn="2 placements captured • no position field matched yet"
+    end
+end
+
 do
     local env=(getgenv and getgenv()) or _G
     local hookmm=rawget(env,"hookmetamethod") or rawget(_G,"hookmetamethod")
@@ -334,40 +516,19 @@ do
             local className
             pcall(function() className=self.ClassName end)
             if S.alive and (method=="FireServer" or method=="InvokeServer")
-                and (className=="RemoteEvent" or className=="RemoteFunction")
+                and (className=="RemoteEvent" or className=="RemoteFunction" or className=="UnreliableRemoteEvent")
                 and os.clock()-(S.lastPlacementClickAt or 0)<2.0 then
-
                 local pack=table.pack(...)
-                local nodes={}
-                for i=1,pack.n do collectPositionNodes(pack[i],{i},nodes,0,{}) end
-                collectTopLevelNumericPositions(pack,nodes,S.lastPlacementWorld)
-                if #nodes>0 then
-                    local ref=S.lastPlacementWorld
-                    local best,bd
-                    for _,node in ipairs(nodes) do
-                        local d=ref and (node.pos-ref).Magnitude or 0
-                        if not bd or d<bd then best,bd=node,d end
-                    end
-                    if best and (not ref or bd<90) then
-                        local p=table.clone(best.path or {})
-                        local argIndex
-                        if best.kind~="ArgsXYZ" and best.kind~="ArgsXZ" then
-                            argIndex=table.remove(p,1)
-                        end
-                        table.insert(S.remoteCandidates,{
-                            remote=self,method=method,args=cloneValue(pack),argIndex=argIndex,path=p,
-                            kind=best.kind,keys=best.keys,argIndices=best.argIndices,
-                            at=os.clock(),distance=bd or 0,name=tostring(self.Name),
-                        })
-                        while #S.remoteCandidates>12 do table.remove(S.remoteCandidates,1) end
-                        S.status.remoteLearn="captured candidate "..tostring(self.Name)
-                    end
-                end
+                table.insert(S.remoteCalls,{
+                    remote=self,method=method,args=cloneValue(pack),at=os.clock(),name=tostring(self.Name)
+                })
+                while #S.remoteCalls>80 do table.remove(S.remoteCalls,1) end
+                S.status.remoteLearn="capturing calls after manual placement..."
             end
             return oldNamecall(self,...)
         end))
         S._oldNamecall=oldNamecall
-        S.status.remoteLearn="ARMED • manually place ONE tower once"
+        S.status.remoteLearn="CALIBRATION 0/2 • manually place two towers far apart"
     else
         S.status.remoteLearn="executor lacks hookmetamethod"
     end
@@ -375,8 +536,6 @@ end
 
 UIS.InputBegan:Connect(function(i,gp)
     if i.UserInputType==Enum.UserInputType.MouseButton1 then
-        -- Record every manual world click. We only promote a captured remote after a tower-card
-        -- counter actually increases, so unrelated clicks/remotes are ignored automatically.
         S.lastPlacementClickAt=os.clock()
         pcall(function() S.lastPlacementWorld=LP:GetMouse().Hit.Position end)
     end
@@ -667,19 +826,25 @@ local function learnRemoteFromPlacement(before,after)
         if n>(before[i] or 0) then changed=i break end
     end
     if not changed then return end
+
     local now=os.clock()
-    for i=#S.remoteCandidates,1,-1 do
-        local c=S.remoteCandidates[i]
-        if now-c.at<2.0 then
-            local full=c.name or "remote"
-            pcall(function() full=c.remote:GetFullName() end)
-            c.full=full
-            S.placeRemote=c
-            S.status.remoteLearn="LEARNED "..full.." • "..tostring(c.kind).." • slot "..tostring(changed)
-            print("[Hour Hub] learned ABTD placement remote: "..full)
-            return
-        end
+    local calls={}
+    for i=#S.remoteCalls,1,-1 do
+        local c=S.remoteCalls[i]
+        if now-c.at<2.3 then table.insert(calls,1,c) else break end
     end
+    if #calls==0 then
+        S.status.remoteLearn="tower placed but no remote call captured"
+        return
+    end
+
+    local event={pos=S.lastPlacementWorld,calls=calls,slot=changed,at=now}
+    table.insert(S.manualPlacements,event)
+    while #S.manualPlacements>4 do table.remove(S.manualPlacements,1) end
+    S.remoteCalls={}
+
+    S.status.remoteLearn=string.format("CALIBRATION %d/2 • captured %d calls",math.min(#S.manualPlacements,2),#calls)
+    tryBuildTwoPointCalibration()
 end
 local function likelyPlacementRemotes()
     local names={}
@@ -709,8 +874,8 @@ end
 local function place(c)
     if S.busy then return false,"another tower action is running" end
     if not S.placeRemote then
-        S.status.place="CALIBRATION: place ONE tower manually once"
-        return false,"waiting for placement remote calibration"
+        S.status.place="CALIBRATION: manually place 2 towers far apart"
+        return false,"waiting for two-point placement calibration"
     end
 
     S.busy=true
@@ -729,7 +894,7 @@ local function place(c)
         if nearestPlaced(p)>5 then
             S.status.place=string.format("remote candidate %d/%d",i,math.min(18,#opts))
             local beforeModels=modelsNear(p,11)
-            local ok,err=firePlacementRemote(S.placeRemote,p)
+            local ok,err=replayLearned(S.placeRemote,p)
             task.wait(.24)
 
             local c2=currentCard(c.index)
@@ -741,7 +906,7 @@ local function place(c)
             if placed then
                 table.insert(S.placed,p)
                 S.placedBySlot[c.index]=(S.placedBySlot[c.index] or 0)+1
-                S.status.click="REMOTE • ACCEPTED • "..S.placeRemote.full.." • "..tostring(S.placeRemote.kind)
+                S.status.click="REMOTE • ACCEPTED • "..S.placeRemote.full.." • "..tostring(S.placeRemote.mapping and S.placeRemote.mapping.type)
                 S.status.place=string.format("slot %d • %s • range %.0f",c.index,CFG.placementMode=="spawn" and "near spawner" or "smart",r)
                 return done(true)
             end
@@ -838,7 +1003,7 @@ sec("MASTER")toggle("Smart Hub","Master switch for Angry Birds automation","mast
 sec("WAVES")toggle("⚡ Auto Skip Next Wave","Presses the real SKIP TO NEXT WAVE button","autoSkip")toggle("▶ Auto Start","Presses START WAVE / READY when visible","autoStart")toggle("⏩ Auto 2X","Keeps the normal unlocked 2X selected","auto2x")toggle("🔁 Auto Continue / Replay","NEXT / CONTINUE / REPLAY after results","autoContinue")
 sec("TOWERS")toggle("🧠 Auto Place","Reads visible tower cards, costs and caps and places affordable towers","autoPlace")toggle("⬆ Auto Upgrade","Best-effort upgrades towers placed by the hub","autoUpgrade")toggle("🔄 Auto Merge","Best-effort merge/combine when exposed by the selected tower","autoMerge")
 sec("LIVE BRAIN")
-local dr=row(150)local dt=label(dr,"v0.3.1 booting • placement remote calibration ready",10,C.text,Enum.Font.Code)dt.Position=UDim2.fromOffset(14,10)dt.Size=UDim2.new(1,-28,1,-20)dt.TextWrapped=true dt.TextYAlignment=Enum.TextYAlignment.Top
+local dr=row(166)local dt=label(dr,"v0.4.0 booting • two-placement calibration ready",10,C.text,Enum.Font.Code)dt.Position=UDim2.fromOffset(14,10)dt.Size=UDim2.new(1,-28,1,-20)dt.TextWrapped=true dt.TextYAlignment=Enum.TextYAlignment.Top
 task.spawn(function()
     while S.alive and sg.Parent do
         local _,conf=spawnPoint()
