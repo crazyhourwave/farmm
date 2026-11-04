@@ -1,6 +1,6 @@
 -- Hour Hub - Angry Birds Tower Defense [BETA] v0.1.0
 if not game:IsLoaded() then game.Loaded:Wait() end
-local VERSION="0.5.0"
+local VERSION="0.6.0"
 if game.PlaceId~=95568014894521 then warn("[Hour Hub / ABTD] wrong place "..tostring(game.PlaceId)) return end
 
 local Players=game:GetService("Players")
@@ -110,6 +110,81 @@ local function clickAtXY(x,y,method)
         VIM:SendMouseButtonEvent(x,y,0,false,game,0)
         return true
     end
+end
+
+local function movePlacementGhost(p,space)
+    Cam=workspace.CurrentCamera or Cam
+    if not Cam then return false end
+    local v,on
+    if space=="viewport" then v,on=Cam:WorldToViewportPoint(p) else v,on=Cam:WorldToScreenPoint(p) end
+    if not on or not v or v.Z<=0 then return false end
+
+    local env=(getgenv and getgenv()) or _G
+    local mover=rawget(env,"mousemoveabs") or rawget(_G,"mousemoveabs")
+    local ok=false
+    if type(mover)=="function" then
+        ok=pcall(mover,math.floor(v.X),math.floor(v.Y))
+    end
+    if not ok then
+        ok=pcall(function() VIM:SendMouseMoveEvent(v.X,v.Y,game) end)
+    end
+    if ok then task.wait(.16) end
+    return ok,v
+end
+
+local function fireMousePlacementSignal(p,verify)
+    local mouse=LP:GetMouse()
+    local env=(getgenv and getgenv()) or _G
+    local fire=rawget(env,"firesignal") or rawget(_G,"firesignal")
+    local getcon=rawget(env,"getconnections") or rawget(_G,"getconnections")
+    local attempts={}
+
+    for _,space in ipairs({"screen","viewport"}) do
+        local moved,v=movePlacementGhost(p,space)
+        if moved then
+            if type(fire)=="function" then
+                local ok=pcall(function()
+                    fire(mouse.Button1Down)
+                    task.wait(.04)
+                    if mouse.Button1Up then fire(mouse.Button1Up) end
+                end)
+                table.insert(attempts,space..":firesignal")
+                if ok then
+                    task.wait(.16)
+                    local vok,vres=pcall(verify)
+                    if vok and vres==true then
+                        S.status.click=string.format("MOUSE SIGNAL • %s • ACCEPTED @ %.0f,%.0f",space,v.X,v.Y)
+                        return true
+                    end
+                end
+            end
+
+            if type(getcon)=="function" then
+                local ok,list=pcall(getcon,mouse.Button1Down)
+                if ok and type(list)=="table" then
+                    for idx,c in ipairs(list) do
+                        local called=false
+                        if type(c)=="table" then
+                            if type(c.Fire)=="function" then called=pcall(function() c:Fire() end)
+                            elseif type(c.Function)=="function" then called=pcall(c.Function) end
+                        end
+                        if called then
+                            table.insert(attempts,space..":connection"..tostring(idx))
+                            task.wait(.14)
+                            local vok,vres=pcall(verify)
+                            if vok and vres==true then
+                                S.status.click=string.format("MOUSE CONNECTION %d • %s • ACCEPTED",idx,space)
+                                return true
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    S.status.mouseSignal="rejected: "..(#attempts>0 and table.concat(attempts," > ") or "no firesignal/getconnections support")
+    return false
 end
 
 local function clickWorld(p,verify)
@@ -1035,7 +1110,12 @@ local function place(c)
             end
 
             local placed=false
-            if S.placeController then
+
+            -- Primary backend: move the real placement ghost, then directly fire the same
+            -- Mouse.Button1Down listeners ABTD uses for manual tower confirmation.
+            placed=fireMousePlacementSignal(p,verifyPlaced)
+
+            if not placed and S.placeController then
                 placed=select(1,tryControllerPlacement(S.placeController,p,verifyPlaced))
                 if placed then S.status.click="CONTROLLER • ACCEPTED • "..S.placeController.key end
             end
@@ -1154,7 +1234,7 @@ sec("MASTER")toggle("Smart Hub","Master switch for Angry Birds automation","mast
 sec("WAVES")toggle("⚡ Auto Skip Next Wave","Presses the real SKIP TO NEXT WAVE button","autoSkip")toggle("▶ Auto Start","Presses START WAVE / READY when visible","autoStart")toggle("⏩ Auto 2X","Keeps the normal unlocked 2X selected","auto2x")toggle("🔁 Auto Continue / Replay","NEXT / CONTINUE / REPLAY after results","autoContinue")
 sec("TOWERS")toggle("🧠 Auto Place","Reads visible tower cards, costs and caps and places affordable towers","autoPlace")toggle("⬆ Auto Upgrade","Best-effort upgrades towers placed by the hub","autoUpgrade")toggle("🔄 Auto Merge","Best-effort merge/combine when exposed by the selected tower","autoMerge")
 sec("LIVE BRAIN")
-local dr=row(190)local dt=label(dr,"v0.5.0 booting • tower-controller discovery ready",10,C.text,Enum.Font.Code)dt.Position=UDim2.fromOffset(14,10)dt.Size=UDim2.new(1,-28,1,-20)dt.TextWrapped=true dt.TextYAlignment=Enum.TextYAlignment.Top
+local dr=row(206)local dt=label(dr,"v0.6.0 booting • direct Mouse.Button1Down placement backend ready",10,C.text,Enum.Font.Code)dt.Position=UDim2.fromOffset(14,10)dt.Size=UDim2.new(1,-28,1,-20)dt.TextWrapped=true dt.TextYAlignment=Enum.TextYAlignment.Top
 task.spawn(function()
     while S.alive and sg.Parent do
         local _,conf=spawnPoint()
@@ -1167,6 +1247,7 @@ task.spawn(function()
             "Waves: "..tostring(S.status.wave or"watching").."    Speed: "..tostring(S.status.speed or"watching"),
             "Placement: "..tostring(S.status.place or"learning").."    Cards: "..tostring(S.status.cards or"scanning"),
             "Click: "..tostring(S.status.click or"waiting"),
+            "Mouse signal: "..tostring(S.status.mouseSignal or"armed"),
             "Controller: "..tostring(S.status.controller or"scanning loaded tower controllers"),
             "Controller try: "..tostring(S.status.controllerTry or"waiting"),
             "Placement remotes: "..tostring(S.status.remotes or"scanning"),
