@@ -1,6 +1,6 @@
 -- Hour Hub - Angry Birds Tower Defense [BETA] v0.1.0
 if not game:IsLoaded() then game.Loaded:Wait() end
-local VERSION="0.2.3"
+local VERSION="0.2.4"
 if game.PlaceId~=95568014894521 then warn("[Hour Hub / ABTD] wrong place "..tostring(game.PlaceId)) return end
 
 local Players=game:GetService("Players")
@@ -112,7 +112,7 @@ local function clickAtXY(x,y,method)
     end
 end
 
-local function clickWorld(p)
+local function clickWorld(p,verify)
     Cam=workspace.CurrentCamera or Cam
     if not Cam then return false end
 
@@ -127,27 +127,36 @@ local function clickWorld(p)
     local wasEnabled=hub and hub.Enabled
     if hub then hub.Enabled=false end
 
-    -- Some executors/Roblox input paths disagree on whether coordinates include the GUI inset.
-    -- Try the exact screen point first, then viewport coordinates as a fallback.
     local attempts={
-        {"executor",screen.X,screen.Y},
-        {"executor",view.X,view.Y},
-        {"virtualuser",screen.X,screen.Y},
-        {"virtualuser",view.X,view.Y},
-        {"vim",screen.X,screen.Y},
-        {"vim",view.X,view.Y},
+        {"executor-screen", "executor",screen.X,screen.Y},
+        {"executor-view",   "executor",view.X,view.Y},
+        {"vu-screen",       "virtualuser",screen.X,screen.Y},
+        {"vu-view",         "virtualuser",view.X,view.Y},
+        {"vim-screen",      "vim",screen.X,screen.Y},
+        {"vim-view",        "vim",view.X,view.Y},
     }
 
-    local used,ok,lastErr
+    local ok,lastErr,tried={}
     for _,a in ipairs(attempts) do
-        local m,x,y=a[1],a[2],a[3]
+        local tag,m,x,y=a[1],a[2],a[3],a[4]
         local success,res=pcall(clickAtXY,x,y,m)
+        table.insert(tried,tag)
         if success and res then
-            used=m
-            ok=true
-            S.status.click=string.format("%s @ %.0f,%.0f",m,x,y)
-            task.wait(.10)
-            break
+            S.status.click=string.format("%s @ %.0f,%.0f • verifying",tag,x,y)
+            task.wait(.18)
+            local accepted=true
+            if type(verify)=="function" then
+                local vok,vres=pcall(verify)
+                accepted=vok and vres==true
+            end
+            if accepted then
+                ok=true
+                S.status.click=string.format("%s @ %.0f,%.0f • ACCEPTED",tag,x,y)
+                break
+            else
+                S.status.click=string.format("%s @ %.0f,%.0f • ignored; trying next",tag,x,y)
+                task.wait(.08)
+            end
         else
             lastErr=res
         end
@@ -155,7 +164,7 @@ local function clickWorld(p)
 
     if hub and hub.Parent then hub.Enabled=wasEnabled~=false end
     if not ok then
-        S.status.click="all input methods failed: "..tostring(lastErr)
+        S.status.click="rejected all: "..table.concat(tried," > ")..(lastErr and (" • "..tostring(lastErr)) or "")
     end
     return ok==true
 end
@@ -480,23 +489,25 @@ local function place(c)
         if nearestPlaced(p)>5 then
             S.status.place=string.format("trying candidate %d/%d",i,math.min(14,#opts))
             local beforeModels=modelsNear(p,11)
-            local sent=clickWorld(p); task.wait(.34)
-            if not sent then
-                S.status.place="world click failed • candidate "..tostring(i)
+            local function verifyPlaced()
+                local c2=currentCard(c.index)
+                if c2 and c2.current>before then return true end
+                for m in pairs(modelsNear(p,11)) do
+                    if not beforeModels[m] then return true end
+                end
+                return false
             end
-            local c2=currentCard(c.index)
-            local placed=(c2 and c2.current>before) or false
+            local placed=clickWorld(p,verifyPlaced)
+            task.wait(.12)
             if not placed then
-                for m in pairs(modelsNear(p,11)) do if not beforeModels[m] then placed=true break end end
+                S.status.place="candidate "..tostring(i).." rejected by every input method"
             end
             if placed then
-                S.status.click=(S.status.click or "clicked").." • ACCEPTED"
                 table.insert(S.placed,p)
                 S.placedBySlot[c.index]=(S.placedBySlot[c.index] or 0)+1
                 S.status.place=string.format("slot %d • %s • range %.0f",c.index,CFG.placementMode=="spawn" and "near spawner" or "smart",r)
                 return done(true)
             end
-            S.status.click=(S.status.click or "clicked").." • rejected"
             -- Keep the card selected for the next candidate; if the game cancelled placement, reselect it.
             local c3=currentCard(c.index)
             if c3 then clickGui(c3.button) task.wait(.10) end
