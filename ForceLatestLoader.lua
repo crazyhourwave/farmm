@@ -24,7 +24,7 @@ if game.GameId==10768476566 or game.PlaceId==120511086614436 then
     end)
     task.wait(.1)
 
-    local url="https://raw.githubusercontent.com/crazyhourwave/farmm/7320364a05bad21052aefa1c0ee9c3260a487c35/DriveHighway.lua?force="..tostring(os.clock()).."_"..tostring(math.random(100000,999999))
+    local url="https://raw.githubusercontent.com/crazyhourwave/farmm/abef6358d57e3ab3b5fe6294515556320faed84a/DriveHighway.lua?force="..tostring(os.clock()).."_"..tostring(math.random(100000,999999))
     local ok,src=pcall(function() return game:HttpGet(url) end)
     if not ok or type(src)~="string" or #src<1000 then
         warn("[Hour Hub] DRIVE direct download failed: "..tostring(src))
