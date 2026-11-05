@@ -2,7 +2,7 @@
 -- Auto Drive + Force MPH + Near-Miss Weaving
 if not game:IsLoaded() then game.Loaded:Wait() end
 
-local VERSION="0.1.0"
+local VERSION="0.1.1"
 local GAME_ID=10768476566
 local ROOT_PLACE=120511086614436
 if game.GameId~=GAME_ID and game.PlaceId~=ROOT_PLACE then
@@ -33,7 +33,7 @@ _G.HOUR_DRIVE=S
 local CFG={
     master=true,
     autoDrive=false,
-    forceSpeed=true,
+    forceSpeed=false,
     targetMph=120,
     nearMiss=false,
     nearMissGap=5.5,
@@ -68,8 +68,33 @@ local function save()
 end
 
 local MPH_PER_STUD=0.626342
-local function mphToStuds(mph) return mph/MPH_PER_STUD end
-local function studsToMph(studs) return studs*MPH_PER_STUD end
+local function mphToStuds(mph) return mph/(S.mphPerStud or MPH_PER_STUD) end
+local function studsToMph(studs) return studs*(S.mphPerStud or MPH_PER_STUD) end
+
+local function externalMphReadout()
+    for _,d in ipairs(PG:GetDescendants()) do
+        if (d:IsA("TextLabel") or d:IsA("TextButton")) and d.Visible and not d:FindFirstAncestor("HourHub_DRIVE") then
+            local txt=tostring(d.Text or ""):upper():gsub(",","")
+            local n=txt:match("(%d+%.?%d*)%s*MPH")
+            n=tonumber(n)
+            if n and n>=0 and n<=500 then return n end
+        end
+    end
+end
+
+local function calibrateMph(root)
+    if not root or os.clock()-(S.lastMphCalibration or 0)<.45 then return end
+    S.lastMphCalibration=os.clock()
+    local shown=externalMphReadout()
+    local studs=flat(root.AssemblyLinearVelocity).Magnitude
+    if shown and shown>=5 and studs>=5 then
+        local ratio=shown/studs
+        if ratio>=.15 and ratio<=3 then
+            S.mphPerStud=S.mphPerStud and (S.mphPerStud*.78+ratio*.22) or ratio
+            S.status.scale=string.format("%.3f MPH/stud",S.mphPerStud)
+        end
+    end
+end
 local function flat(v) return Vector3.new(v.X,0,v.Z) end
 local function unitFlat(v)
     v=flat(v)
@@ -180,14 +205,16 @@ local function vehicleLike(m)
     if not m:IsA("Model") or isOurModel(m) then return false end
     if Players:GetPlayerFromCharacter(m) then return false end
 
-    local seat=m:FindFirstChildWhichIsA("VehicleSeat",true)
-    local n=m.Name:lower()
-    local named=n:find("car") or n:find("traffic") or n:find("vehicle") or n:find("truck") or n:find("bike") or n:find("motor")
-    if not seat and not named then return false end
-
     local ok,cf,size=pcall(m.GetBoundingBox,m)
     if not ok then return false end
     if size.X<1.5 or size.Z<2 or size.X>28 or size.Z>45 then return false end
+
+    local seat=m:FindFirstChildWhichIsA("VehicleSeat",true)
+    local part=m.PrimaryPart or m:FindFirstChildWhichIsA("BasePart",true)
+    local moving=part and flat(part.AssemblyLinearVelocity).Magnitude>8 or false
+    local n=m.Name:lower()
+    local named=n:find("car") or n:find("traffic") or n:find("vehicle") or n:find("truck") or n:find("bike") or n:find("motor")
+    if not seat and not named and not moving then return false end
     return true,cf,size
 end
 
@@ -265,6 +292,7 @@ local function controlStep(dt)
         return
     end
 
+    calibrateMph(root)
     local fwd,right,road=roadBasis(root)
     initLane(root,fwd,right,road)
 
@@ -504,6 +532,7 @@ task.spawn(function()
             "Drive: "..tostring(S.status.drive or "waiting"),
             "Lane: "..tostring(S.status.lane or "waiting"),
             "Traffic: "..tostring(S.status.traffic or "scanning"),
+            "MPH scale: "..tostring(S.status.scale or string.format("%.3f default",MPH_PER_STUD)),
             "Recovery: "..tostring(S.status.recovery or "idle"),
             S.status.error and ("Error: "..S.status.error) or "",
         },"
