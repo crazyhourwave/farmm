@@ -1,6 +1,6 @@
 -- Hour Hub - Angry Birds Tower Defense [BETA] v0.1.0
 if not game:IsLoaded() then game.Loaded:Wait() end
-local VERSION="0.6.1"
+local VERSION="0.6.2"
 if game.PlaceId~=95568014894521 then warn("[Hour Hub / ABTD] wrong place "..tostring(game.PlaceId)) return end
 
 local Players=game:GetService("Players")
@@ -1208,9 +1208,18 @@ local function place(c)
 
             local placed=false
 
-            -- Primary backend: move the real placement ghost, then directly fire the same
-            -- Mouse.Button1Down listeners ABTD uses for manual tower confirmation.
-            placed=fireMousePlacementSignal(p,verifyPlaced)
+            -- First try the ordinary confirmation path only AFTER ABTD's own preview has been moved
+            -- onto this candidate and did not mark it invalid. Earlier builds clicked candidates before
+            -- validating the ghost, so valid input could still be wasted on illegal ground.
+            placed=clickWorld(p,verifyPlaced)
+            if placed then
+                S.status.click="VALID PREVIEW • NORMAL CONFIRM • ACCEPTED"
+            end
+
+            if not placed then
+                -- Direct Mouse.Button1Down listener fallback.
+                placed=fireMousePlacementSignal(p,verifyPlaced)
+            end
 
             if not placed and S.placeController then
                 placed=select(1,tryControllerPlacement(S.placeController,p,verifyPlaced))
@@ -1331,7 +1340,7 @@ sec("MASTER")toggle("Smart Hub","Master switch for Angry Birds automation","mast
 sec("WAVES")toggle("⚡ Auto Skip Next Wave","Presses the real SKIP TO NEXT WAVE button","autoSkip")toggle("▶ Auto Start","Presses START WAVE / READY when visible","autoStart")toggle("⏩ Auto 2X","Keeps the normal unlocked 2X selected","auto2x")toggle("🔁 Auto Continue / Replay","NEXT / CONTINUE / REPLAY after results","autoContinue")
 sec("TOWERS")toggle("🧠 Auto Place","Reads visible tower cards, costs and caps and places affordable towers","autoPlace")toggle("⬆ Auto Upgrade","Best-effort upgrades towers placed by the hub","autoUpgrade")toggle("🔄 Auto Merge","Best-effort merge/combine when exposed by the selected tower","autoMerge")
 sec("LIVE BRAIN")
-local dr=row(222)local dt=label(dr,"v0.6.1 booting • preview-validated placement ready",10,C.text,Enum.Font.Code)dt.Position=UDim2.fromOffset(14,10)dt.Size=UDim2.new(1,-28,1,-20)dt.TextWrapped=true dt.TextYAlignment=Enum.TextYAlignment.Top
+local dr=row(230)local dt=label(dr,"v0.6.2 booting • valid-preview normal confirmation ready",10,C.text,Enum.Font.Code)dt.Position=UDim2.fromOffset(14,10)dt.Size=UDim2.new(1,-28,1,-20)dt.TextWrapped=true dt.TextYAlignment=Enum.TextYAlignment.Top
 task.spawn(function()
     while S.alive and sg.Parent do
         local _,conf=spawnPoint()
