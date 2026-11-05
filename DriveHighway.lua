@@ -2,13 +2,11 @@
 -- Auto Drive + Force MPH + Near-Miss Weaving
 if not game:IsLoaded() then game.Loaded:Wait() end
 
-local VERSION="0.2.0"
+local VERSION="0.2.1"
 local GAME_ID=10768476566
 local ROOT_PLACE=120511086614436
-if game.GameId~=GAME_ID and game.PlaceId~=ROOT_PLACE then
-    warn("[Hour Hub / DRIVE] wrong experience "..tostring(game.GameId).." / "..tostring(game.PlaceId))
-    return
-end
+-- Do not hard-return here. The loader already routes this module, and we want the UI to
+-- remain visible even if DRIVE moves players into a new/sub-place after an update.
 
 local Players=game:GetService("Players")
 local RunService=game:GetService("RunService")
@@ -129,6 +127,59 @@ local function findVehicle()
             return model,d,root
         end
     end
+end
+
+local function promptDistance(prompt)
+    local parent=prompt and prompt.Parent
+    local part=parent and (parent:IsA("BasePart") and parent or parent:FindFirstAncestorWhichIsA("BasePart"))
+    local ch=LP.Character
+    local hrp=ch and ch:FindFirstChild("HumanoidRootPart")
+    return part and hrp and (part.Position-hrp.Position).Magnitude or math.huge
+end
+
+local function tryAutoEnter()
+    local h=humanoid()
+    if not h or h.SeatPart then return false end
+    if os.clock()-(S.lastEnterTry or 0)<1.25 then return false end
+    S.lastEnterTry=os.clock()
+
+    local env=(getgenv and getgenv()) or _G
+    local firePrompt=rawget(env,"fireproximityprompt") or rawget(_G,"fireproximityprompt")
+    local best,bestD
+    for _,d in ipairs(workspace:GetDescendants()) do
+        if d:IsA("ProximityPrompt") and d.Enabled then
+            local a=tostring(d.ActionText or ""):lower()
+            local o=tostring(d.ObjectText or ""):lower()
+            if a:find("drive",1,true) or a:find("enter",1,true) or o:find("car",1,true) or o:find("vehicle",1,true) then
+                local dist=promptDistance(d)
+                if dist<=35 and (not bestD or dist<bestD) then best,bestD=d,dist end
+            end
+        end
+    end
+    if best and type(firePrompt)=="function" then
+        local ok=pcall(firePrompt,best)
+        S.status.enter=ok and ("fired Drive prompt • "..string.format("%.0f studs",bestD or 0)) or "Drive prompt call failed"
+        if ok then return true end
+    end
+
+    local ch=LP.Character
+    local hrp=ch and ch:FindFirstChild("HumanoidRootPart")
+    local nearest,nd
+    if hrp then
+        for _,d in ipairs(workspace:GetDescendants()) do
+            if d:IsA("VehicleSeat") and not d.Occupant then
+                local dist=(d.Position-hrp.Position).Magnitude
+                if dist<=28 and (not nd or dist<nd) then nearest,nd=d,dist end
+            end
+        end
+    end
+    if nearest then
+        local ok=pcall(function() nearest:Sit(h) end)
+        S.status.enter=ok and ("seat fallback • "..string.format("%.0f studs",nd or 0)) or "seat fallback failed"
+        return ok
+    end
+    S.status.enter="waiting for nearby Drive prompt/car"
+    return false
 end
 
 local function refreshVehicle()
@@ -294,7 +345,8 @@ local function controlStep(dt)
     if not S.alive or not CFG.master then return end
     local model,seat,root=refreshVehicle()
     if not root or not root.Parent then
-        S.status.drive="sit in a vehicle"
+        S.status.drive="auto-entering nearby car..."
+        tryAutoEnter()
         return
     end
 
@@ -380,6 +432,11 @@ local function label(p,t,z,col,font)
     l.Font=font or Enum.Font.Gotham l.TextXAlignment=Enum.TextXAlignment.Left l.Parent=p
     return l
 end
+
+pcall(function()
+    local boot=PG:FindFirstChild("HourHub_DRIVE_BOOT")
+    if boot then boot:Destroy() end
+end)
 
 local sg=Instance.new("ScreenGui")
 sg.Name="HourHub_DRIVE" sg.ResetOnSpawn=false sg.DisplayOrder=999999 sg.IgnoreGuiInset=false sg.Parent=PG
@@ -536,6 +593,7 @@ task.spawn(function()
         liveText.Text=table.concat({
             string.format("Speed: %.0f MPH / %.0f target",actual,CFG.targetMph),
             "Vehicle: "..tostring(S.status.vehicle or "not seated"),
+            "Auto Enter: "..tostring(S.status.enter or "armed"),
             "Drive: "..tostring(S.status.drive or "waiting"),
             "Lane: "..tostring(S.status.lane or "waiting"),
             "Traffic: "..tostring(S.status.traffic or "scanning"),
