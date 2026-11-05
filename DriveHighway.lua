@@ -2,7 +2,7 @@
 -- Auto Drive + Force MPH + Near-Miss Weaving
 if not game:IsLoaded() then game.Loaded:Wait() end
 
-local VERSION="0.2.1"
+local VERSION="0.2.2"
 local GAME_ID=10768476566
 local ROOT_PLACE=120511086614436
 -- Do not hard-return here. The loader already routes this module, and we want the UI to
@@ -600,8 +600,7 @@ task.spawn(function()
             "MPH scale: "..tostring(S.status.scale or string.format("%.3f default",MPH_PER_STUD)),
             "Recovery: "..tostring(S.status.recovery or "idle"),
             S.status.error and ("Error: "..S.status.error) or "",
-        },"
-")
+        },"\\n")
         task.wait(.2)
     end
 end)
