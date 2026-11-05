@@ -2,7 +2,7 @@
 -- Auto Drive + Force MPH + Near-Miss Weaving
 if not game:IsLoaded() then game.Loaded:Wait() end
 
-local VERSION="0.1.1"
+local VERSION="0.2.0"
 local GAME_ID=10768476566
 local ROOT_PLACE=120511086614436
 if game.GameId~=GAME_ID and game.PlaceId~=ROOT_PLACE then
@@ -32,10 +32,10 @@ _G.HOUR_DRIVE=S
 
 local CFG={
     master=true,
-    autoDrive=false,
-    forceSpeed=false,
+    autoDrive=true,
+    forceSpeed=true,
     targetMph=120,
-    nearMiss=false,
+    nearMiss=true,
     nearMissGap=5.5,
     antiFlip=true,
     laneStrength=1.75,
@@ -54,6 +54,12 @@ pcall(function()
     end
 end)
 
+-- DRIVE module is a farm: every execution starts automation enabled.
+CFG.master=true
+CFG.autoDrive=true
+CFG.forceSpeed=true
+CFG.nearMiss=true
+
 local saveQueued=false
 local function save()
     if saveQueued then return end
@@ -68,6 +74,11 @@ local function save()
 end
 
 local MPH_PER_STUD=0.626342
+local function flat(v) return Vector3.new(v.X,0,v.Z) end
+local function unitFlat(v)
+    v=flat(v)
+    return v.Magnitude>.001 and v.Unit or Vector3.new(0,0,-1)
+end
 local function mphToStuds(mph) return mph/(S.mphPerStud or MPH_PER_STUD) end
 local function studsToMph(studs) return studs*(S.mphPerStud or MPH_PER_STUD) end
 
@@ -94,11 +105,6 @@ local function calibrateMph(root)
             S.status.scale=string.format("%.3f MPH/stud",S.mphPerStud)
         end
     end
-end
-local function flat(v) return Vector3.new(v.X,0,v.Z) end
-local function unitFlat(v)
-    v=flat(v)
-    return v.Magnitude>.001 and v.Unit or Vector3.new(0,0,-1)
 end
 
 local function humanoid()
@@ -376,7 +382,8 @@ local function label(p,t,z,col,font)
 end
 
 local sg=Instance.new("ScreenGui")
-sg.Name="HourHub_DRIVE" sg.ResetOnSpawn=false sg.DisplayOrder=999999 sg.Parent=PG
+sg.Name="HourHub_DRIVE" sg.ResetOnSpawn=false sg.DisplayOrder=999999 sg.IgnoreGuiInset=false sg.Parent=PG
+S.status.boot="UI mounted • auto farm enabled"
 
 local main=Instance.new("Frame")
 main.Size=UDim2.fromOffset(590,520) main.Position=UDim2.new(.5,-295,.5,-260)
