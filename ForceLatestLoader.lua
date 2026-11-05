@@ -3,6 +3,16 @@
 
 if not game:IsLoaded() then game.Loaded:Wait() end
 
+if game.GameId==10768476566 or game.PlaceId==120511086614436 then
+    local pg=game:GetService("Players").LocalPlayer:FindFirstChildOfClass("PlayerGui")
+    local dr=rawget(_G,"HOUR_DRIVE")
+    local gui=pg and pg:FindFirstChild("HourHub_DRIVE")
+    if dr and dr.alive and gui and gui:IsA("ScreenGui") and type(dr.toggleMenu)=="function" then
+        pcall(dr.toggleMenu)
+        return
+    end
+end
+
 -- ABTD: bypass Hub.lua completely so stale hub instances/caches cannot preserve an old module.
 local EXPECT_ABTD="0.6.2"
 if game.PlaceId==95568014894521 then
@@ -92,13 +102,14 @@ pcall(function() if syn and type(syn.clear_on_teleport)=="function" then syn.cle
 pcall(function() if _G.HOUR_HUB and _G.HOUR_HUB.unload then _G.HOUR_HUB.unload() end end)
 pcall(function() if _G.CKD_SF and _G.CKD_SF.unload then _G.CKD_SF.unload() end end)
 pcall(function() if _G.HOUR_ABTD and _G.HOUR_ABTD.unload then _G.HOUR_ABTD.unload() end end)
+pcall(function() if _G.HOUR_DRIVE and _G.HOUR_DRIVE.unload then _G.HOUR_DRIVE.unload() end end)
 _G.HOUR_HUB=nil
 
 -- Remove leftover game-specific windows before the hub recreates the correct one.
 pcall(function()
     local pg=game:GetService("Players").LocalPlayer:FindFirstChildOfClass("PlayerGui")
     if not pg then return end
-    for _,name in ipairs({"CKD_LiquidGlass","HourHub_ABTD","HourHub_Unsupported"}) do
+    for _,name in ipairs({"CKD_LiquidGlass","HourHub_ABTD","HourHub_DRIVE","HourHub_Unsupported"}) do
         local g=pg:FindFirstChild(name)
         if g then g:Destroy() end
     end
