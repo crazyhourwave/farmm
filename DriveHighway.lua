@@ -2,7 +2,7 @@
 -- Auto Drive + Force MPH + Near-Miss Weaving
 if not game:IsLoaded() then game.Loaded:Wait() end
 
-local VERSION="0.3.2"
+local VERSION="0.3.3"
 local GAME_ID=10768476566
 local ROOT_PLACE=120511086614436
 -- Do not hard-return here. The loader already routes this module, and we want the UI to
@@ -25,7 +25,8 @@ local S={
     VERSION=VERSION,alive=true,vehicle=nil,seat=nil,root=nil,roadPart=nil,
     laneOffset=nil,baseLaneOffset=0,targetLaneOffset=0,targetTraffic=nil,
     highwayOrigin=nil,highwayForward=nil,highwayRight=nil,
-    laneCenters={},dodge=nil,nearMissSide=1,status={},lastTrafficScan=0,lastRoadScan=0
+    laneCenters={},detectedLaneWidth=nil,laneCenterLocked=false,dodge=nil,nearMissSide=1,
+    status={},lastTrafficScan=0,lastRoadScan=0,lastLineScan=0
 }
 _G.HOUR_DRIVE=S
 
@@ -198,6 +199,8 @@ local function refreshVehicle()
         S.highwayForward=nil
         S.highwayRight=nil
         S.laneCenters={}
+        S.detectedLaneWidth=nil
+        S.laneCenterLocked=false
         S.dodge=nil
         S.status.vehicle=model and model.Name or "not seated"
     end
@@ -258,6 +261,121 @@ local function initLane(root,fwd,right,road)
     if S.targetLaneOffset==nil then S.targetLaneOffset=S.baseLaneOffset end
 end
 
+local function brightLaneColor(c)
+    if typeof(c)~="Color3" then return false end
+    local white=c.R>.62 and c.G>.62 and c.B>.62
+    local yellow=c.R>.62 and c.G>.46 and c.B<.45
+    return white or yellow
+end
+
+local function isLaneMarkerPart(p,fwd)
+    if not p:IsA("BasePart") then return false end
+    if S.vehicle and p:IsDescendantOf(S.vehicle) then return false end
+    if LP.Character and p:IsDescendantOf(LP.Character) then return false end
+    if p.Transparency>.75 then return false end
+
+    local n=p.Name:lower()
+    local nameHint=n:find("lane",1,true) or n:find("line",1,true) or n:find("stripe",1,true)
+        or n:find("mark",1,true) or n:find("divider",1,true)
+
+    local thin=math.min(p.Size.X,p.Size.Z)<=3.2 and math.max(p.Size.X,p.Size.Z)>=3.5 and p.Size.Y<=3.5
+    if not thin and not nameHint then return false end
+
+    local a=unitFlat(p.CFrame.LookVector)
+    local b=unitFlat(p.CFrame.RightVector)
+    local align=math.max(math.abs(a:Dot(fwd)),math.abs(b:Dot(fwd)))
+    if align<.72 then return false end
+    return nameHint or brightLaneColor(p.Color)
+end
+
+local function clusteredOffsets(parts,right)
+    local vals={}
+    for _,p in ipairs(parts) do
+        local off=laneOffsetFor(p.Position,nil,right)
+        local merged=false
+        for _,v in ipairs(vals) do
+            if math.abs(v.off-off)<1.35 then
+                v.off=(v.off*v.n+off)/(v.n+1)
+                v.n+=1
+                merged=true
+                break
+            end
+        end
+        if not merged then vals[#vals+1]={off=off,n=1} end
+    end
+    table.sort(vals,function(a,b)return a.off<b.off end)
+    return vals
+end
+
+local function scanPaintedLaneCenter(root,fwd,right)
+    if os.clock()-(S.lastLineScan or 0)<.22 then return end
+    S.lastLineScan=os.clock()
+
+    local op=OverlapParams.new()
+    op.FilterType=Enum.RaycastFilterType.Exclude
+    local ex={}
+    if LP.Character then ex[#ex+1]=LP.Character end
+    if S.vehicle then ex[#ex+1]=S.vehicle end
+    op.FilterDescendantsInstances=ex
+
+    local scanCF=CFrame.lookAt(root.Position,root.Position+fwd,Vector3.yAxis)
+    local ok,parts=pcall(function()
+        return workspace:GetPartBoundsInBox(scanCF,Vector3.new(72,16,150),op)
+    end)
+    if not ok or type(parts)~="table" then
+        S.status.lines="scan unavailable"
+        return
+    end
+
+    local markers={}
+    for _,p in ipairs(parts) do
+        if isLaneMarkerPart(p,fwd) then
+            local ahead=(p.Position-root.Position):Dot(fwd)
+            if ahead>-35 and ahead<115 then markers[#markers+1]=p end
+        end
+    end
+
+    local vals=clusteredOffsets(markers,right)
+    if #vals<2 then
+        S.status.lines="no stripe pair • "..tostring(#vals).." marker groups"
+        return
+    end
+
+    local ref=(S.dodge and (S.baseLaneOffset or 0)) or (S.laneOffset or 0)
+    local best,bestScore
+    for i=1,#vals-1 do
+        local l,r=vals[i].off,vals[i+1].off
+        local width=r-l
+        if width>=7 and width<=18.5 then
+            local center=(l+r)*.5
+            local contains=ref>=l-1 and ref<=r+1
+            local score=math.abs(center-ref)+(contains and -8 or 0)+math.abs(width-(S.detectedLaneWidth or 11.5))*.35
+            if not bestScore or score<bestScore then
+                best,bestScore={left=l,right=r,center=center,width=width},score
+            end
+        end
+    end
+
+    if not best then
+        S.status.lines="markers found • no realistic lane pair"
+        return
+    end
+
+    S.detectedLaneWidth=best.width
+    if not S.dodge then
+        if not S.laneCenterLocked then
+            S.baseLaneOffset=best.center
+            S.laneCenterLocked=true
+        else
+            S.baseLaneOffset=(S.baseLaneOffset or best.center)*.78+best.center*.22
+        end
+        S.targetLaneOffset=S.baseLaneOffset
+    end
+
+    S.status.lines=string.format("LEFT %.1f • RIGHT %.1f • CENTER %.1f • WIDTH %.1f",
+        best.left,best.right,best.center,best.width)
+end
+
 local function isOurModel(m)
     if not m then return true end
     if S.vehicle and (m==S.vehicle or m:IsDescendantOf(S.vehicle)) then return true end
@@ -290,7 +408,7 @@ local function roadHalfWidth(road)
 end
 
 local function buildLaneCenters(road,current)
-    local width=math.max(8.5,CFG.laneWidth or 11.5)
+    local width=math.max(8.5,S.detectedLaneWidth or CFG.laneWidth or 11.5)
     local base=S.baseLaneOffset or 0
     local centers={base-width,base,base+width}
     S.laneCenters=centers
@@ -346,14 +464,14 @@ end
 
 local function clampRoadOffset(off,road)
     local base=S.baseLaneOffset or 0
-    local span=math.max(10,(CFG.laneWidth or 11.5)*1.35)
+    local span=math.max(10,(S.detectedLaneWidth or CFG.laneWidth or 11.5)*1.35)
     return math.clamp(off,base-span,base+span)
 end
 
 local function corridorRisk(off,list,ignore,road)
     local risk=0
     local base=S.baseLaneOffset or 0
-    local span=math.max(10,(CFG.laneWidth or 11.5)*1.35)
+    local span=math.max(10,(S.detectedLaneWidth or CFG.laneWidth or 11.5)*1.35)
     local edge=span-math.abs(off-base)
     if edge<2 then risk+=(2-edge)*500 end
 
@@ -470,11 +588,14 @@ local function controlStep(dt)
     calibrateMph(root)
     local fwd,right,road=roadBasis(root)
     initLane(root,fwd,right,road)
+    scanPaintedLaneCenter(root,fwd,right)
 
     if #S.laneCenters==0 then
         buildLaneCenters(road,S.laneOffset or 0)
-        S.baseLaneOffset=0
-        S.targetLaneOffset=0
+        if not S.laneCenterLocked then
+            S.baseLaneOffset=S.baseLaneOffset or 0
+            S.targetLaneOffset=S.baseLaneOffset
+        end
     end
 
     local list={}
@@ -629,7 +750,7 @@ local function toggle(txt,desc,key)
         if key=="autoDrive" and CFG[key] then
             S.highwayOrigin=nil S.highwayForward=nil S.highwayRight=nil
             S.baseLaneOffset=0 S.targetLaneOffset=0 S.laneOffset=nil
-            S.laneCenters={} S.dodge=nil
+            S.laneCenters={} S.detectedLaneWidth=nil S.laneCenterLocked=false S.dodge=nil
         end
         save() draw()
     end)
@@ -707,14 +828,14 @@ toggle("Anti Flip","Rights the vehicle if it rolls far enough to stop farming","
 button("↔ RESET / RE-LOCK CURRENT LANE",function()
     S.highwayOrigin=nil S.highwayForward=nil S.highwayRight=nil
     S.baseLaneOffset=0 S.targetLaneOffset=0 S.laneOffset=nil
-    S.laneCenters={} S.dodge=nil S.targetTraffic=nil
+    S.laneCenters={} S.detectedLaneWidth=nil S.laneCenterLocked=false S.dodge=nil S.targetTraffic=nil
     S.status.drive="highway/lane lock reset"
 end)
 button("⇄ FLIP DRIVING DIRECTION",function()
     CFG.direction=CFG.direction*-1
     S.highwayOrigin=nil S.highwayForward=nil S.highwayRight=nil
     S.baseLaneOffset=0 S.targetLaneOffset=0 S.laneOffset=nil
-    S.laneCenters={} S.dodge=nil
+    S.laneCenters={} S.detectedLaneWidth=nil S.laneCenterLocked=false S.dodge=nil
     save()
     S.status.drive=CFG.direction==1 and "direction: current traffic" or "direction: opposite"
 end)
@@ -735,6 +856,7 @@ task.spawn(function()
             "Auto Enter: "..tostring(S.status.enter or "armed"),
             "Drive: "..tostring(S.status.drive or "waiting"),
             "Lane: "..tostring(S.status.lane or "waiting"),
+            "Lane Lines: "..tostring(S.status.lines or "scanning painted boundaries"),
             "Heading: "..tostring(S.status.heading or "locking current highway"),
             "Traffic: "..tostring(S.status.traffic or "scanning"),
             "Near Miss AI: "..tostring(S.status.nearMiss or "hunting traffic"),
