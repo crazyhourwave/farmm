@@ -3,7 +3,7 @@
 
 if not game:IsLoaded() then game.Loaded:Wait() end
 
-local EXPECT_DRIVE="0.2.0"
+local EXPECT_DRIVE="0.2.1"
 if game.GameId==10768476566 or game.PlaceId==120511086614436 then
     local pg=game:GetService("Players").LocalPlayer:FindFirstChildOfClass("PlayerGui")
     local dr=rawget(_G,"HOUR_DRIVE")
@@ -24,7 +24,7 @@ if game.GameId==10768476566 or game.PlaceId==120511086614436 then
     end)
     task.wait(.1)
 
-    local url="https://raw.githubusercontent.com/crazyhourwave/farmm/5853fd5bb1e0a92642a8ffa4471fac23cfc6638a/DriveHighway.lua?force="..tostring(os.clock()).."_"..tostring(math.random(100000,999999))
+    local url="https://raw.githubusercontent.com/crazyhourwave/farmm/1ddda449832ad870fadc2fe4f5aba79c4a7ac0b6/DriveHighway.lua?force="..tostring(os.clock()).."_"..tostring(math.random(100000,999999))
     local ok,src=pcall(function() return game:HttpGet(url) end)
     if not ok or type(src)~="string" or #src<1000 then
         warn("[Hour Hub] DRIVE direct download failed: "..tostring(src))
