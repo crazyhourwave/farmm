@@ -2,7 +2,7 @@
 -- Auto Drive + Force MPH + Near-Miss Weaving
 if not game:IsLoaded() then game.Loaded:Wait() end
 
-local VERSION="0.3.0"
+local VERSION="0.3.1"
 local GAME_ID=10768476566
 local ROOT_PLACE=120511086614436
 -- Do not hard-return here. The loader already routes this module, and we want the UI to
@@ -23,7 +23,8 @@ end
 
 local S={
     VERSION=VERSION,alive=true,vehicle=nil,seat=nil,root=nil,roadPart=nil,
-    laneOffset=nil,baseLaneOffset=nil,targetLaneOffset=nil,targetTraffic=nil,
+    laneOffset=nil,baseLaneOffset=0,targetLaneOffset=0,targetTraffic=nil,
+    highwayOrigin=nil,highwayForward=nil,highwayRight=nil,
     laneCenters={},dodge=nil,nearMissSide=1,status={},lastTrafficScan=0,lastRoadScan=0
 }
 _G.HOUR_DRIVE=S
@@ -190,9 +191,14 @@ local function refreshVehicle()
         S.vehicle,S.seat,S.root=model,seat,root
         S.roadPart=nil
         S.laneOffset=nil
-        S.baseLaneOffset=nil
-        S.targetLaneOffset=nil
+        S.baseLaneOffset=0
+        S.targetLaneOffset=0
         S.targetTraffic=nil
+        S.highwayOrigin=nil
+        S.highwayForward=nil
+        S.highwayRight=nil
+        S.laneCenters={}
+        S.dodge=nil
         S.status.vehicle=model and model.Name or "not seated"
     end
     return model,seat,root
@@ -220,36 +226,43 @@ end
 
 local function roadBasis(root)
     local part=rayRoad(root)
-    if not part or not part:IsA("BasePart") then
-        local f=unitFlat(root.CFrame.LookVector)*CFG.direction
-        local r=Vector3.new(-f.Z,0,f.X)
-        return f,r,nil
+
+    if not S.highwayForward or not S.highwayRight or not S.highwayOrigin then
+        local carForward=unitFlat(root.CFrame.LookVector)
+        local axis=carForward
+
+        if part and part:IsA("BasePart") then
+            local roadAxis=part.Size.Z>=part.Size.X and unitFlat(part.CFrame.LookVector) or unitFlat(part.CFrame.RightVector)
+            if roadAxis:Dot(carForward)<0 then roadAxis=-roadAxis end
+            if roadAxis:Dot(carForward)>.72 then axis=roadAxis end
+        end
+
+        axis*=CFG.direction
+        S.highwayForward=unitFlat(axis)
+        S.highwayRight=Vector3.new(-S.highwayForward.Z,0,S.highwayForward.X)
+        S.highwayOrigin=root.Position
+        S.baseLaneOffset=0
+        S.targetLaneOffset=0
+        S.laneOffset=0
+        S.laneCenters={}
+        S.dodge=nil
+        S.status.heading="LOCKED TO CURRENT HIGHWAY"
     end
 
     S.roadPart=part
-    local axis
-    if part.Size.Z>=part.Size.X then axis=unitFlat(part.CFrame.LookVector)
-    else axis=unitFlat(part.CFrame.RightVector) end
-
-    local carForward=unitFlat(root.CFrame.LookVector)
-    if axis:Dot(carForward)<0 then axis=-axis end
-    axis*=CFG.direction
-    local right=Vector3.new(-axis.Z,0,axis.X)
-    return axis,right,part
+    return S.highwayForward,S.highwayRight,part
 end
 
 local function laneOffsetFor(pos,road,right)
-    if not road then return 0 end
-    return (pos-road.Position):Dot(right)
+    if not S.highwayOrigin then return 0 end
+    right=right or S.highwayRight
+    return (pos-S.highwayOrigin):Dot(right)
 end
 
 local function initLane(root,fwd,right,road)
-    local off=laneOffsetFor(root.Position,road,right)
-    if S.baseLaneOffset==nil then
-        S.baseLaneOffset=off
-        S.targetLaneOffset=off
-    end
-    S.laneOffset=off
+    S.laneOffset=laneOffsetFor(root.Position,road,right)
+    if S.baseLaneOffset==nil then S.baseLaneOffset=0 end
+    if S.targetLaneOffset==nil then S.targetLaneOffset=S.baseLaneOffset end
 end
 
 local function isOurModel(m)
@@ -284,27 +297,18 @@ local function roadHalfWidth(road)
 end
 
 local function buildLaneCenters(road,current)
-    local half=roadHalfWidth(road)
     local width=math.max(8.5,CFG.laneWidth or 11.5)
-    local usable=half*2
-    local count=math.max(1,math.floor(usable/width))
-    local actual=usable/count
-    local centers={}
-    for i=1,count do
-        centers[i]=-half+actual*(i-.5)
-    end
-    table.sort(centers)
+    local base=S.baseLaneOffset or 0
+    local centers={base-width,base,base+width}
     S.laneCenters=centers
 
-    if current~=nil and #centers>0 then
-        local best,bd=centers[1],math.huge
-        for _,x in ipairs(centers) do
-            local d=math.abs(x-current)
-            if d<bd then best,bd=x,d end
-        end
-        return best
+    local cur=current or base
+    local best,bd=base,math.huge
+    for _,x in ipairs(centers) do
+        local d=math.abs(x-cur)
+        if d<bd then best,bd=x,d end
     end
-    return centers[math.ceil(#centers/2)] or 0
+    return best
 end
 
 local function trafficList(root,fwd,right,road)
@@ -318,8 +322,8 @@ local function trafficList(root,fwd,right,road)
             if ok then
                 local rel=cf.Position-root.Position
                 local ahead=rel:Dot(fwd)
-                local lateral=rel:Dot(right)
-                if ahead>-35 and ahead<230 and math.abs(lateral)<roadHalfWidth(road)+18 then
+                local lateral=laneOffsetFor(cf.Position,road,right)
+                if ahead>-35 and ahead<230 and math.abs(lateral-(S.baseLaneOffset or 0))<45 then
                     local part=m.PrimaryPart or m:FindFirstChildWhichIsA("BasePart",true)
                     local vel=part and flat(part.AssemblyLinearVelocity) or Vector3.zero
                     table.insert(out,{
@@ -342,21 +346,23 @@ local function trafficInfoFor(model,root,fwd,right)
     local rel=cf.Position-root.Position
     return {
         model=model,pos=cf.Position,size=size,
-        ahead=rel:Dot(fwd),lateral=rel:Dot(right),
+        ahead=rel:Dot(fwd),lateral=laneOffsetFor(cf.Position,nil,right),
         width=math.min(size.X,size.Z),length=math.max(size.X,size.Z),
     }
 end
 
 local function clampRoadOffset(off,road)
-    local half=roadHalfWidth(road)
-    return math.clamp(off,-half,half)
+    local base=S.baseLaneOffset or 0
+    local span=math.max(10,(CFG.laneWidth or 11.5)*1.35)
+    return math.clamp(off,base-span,base+span)
 end
 
 local function corridorRisk(off,list,ignore,road)
     local risk=0
-    local half=roadHalfWidth(road)
-    local edge=half-math.abs(off)
-    if edge<4 then risk+=(4-edge)*180 end
+    local base=S.baseLaneOffset or 0
+    local span=math.max(10,(CFG.laneWidth or 11.5)*1.35)
+    local edge=span-math.abs(off-base)
+    if edge<2 then risk+=(2-edge)*500 end
 
     for _,t in ipairs(list) do
         if t.model~=ignore and t.ahead>-8 and t.ahead<105 then
@@ -471,11 +477,10 @@ local function controlStep(dt)
     local fwd,right,road=roadBasis(root)
     initLane(root,fwd,right,road)
 
-    if road and (#S.laneCenters==0 or S._laneRoad~=road) then
-        S._laneRoad=road
-        local snapped=buildLaneCenters(road,S.laneOffset or 0)
-        S.baseLaneOffset=snapped
-        S.targetLaneOffset=snapped
+    if #S.laneCenters==0 then
+        buildLaneCenters(road,S.laneOffset or 0)
+        S.baseLaneOffset=0
+        S.targetLaneOffset=0
     end
 
     local list={}
@@ -625,7 +630,9 @@ local function toggle(txt,desc,key)
     btn.Activated:Connect(function()
         CFG[key]=not CFG[key]
         if key=="autoDrive" and CFG[key] then
-            S.baseLaneOffset=nil S.targetLaneOffset=nil
+            S.highwayOrigin=nil S.highwayForward=nil S.highwayRight=nil
+            S.baseLaneOffset=0 S.targetLaneOffset=0 S.laneOffset=nil
+            S.laneCenters={} S.dodge=nil
         end
         save() draw()
     end)
@@ -701,12 +708,16 @@ slider("Lane Strength",0.5,3.5,"laneStrength","x")
 section("SAFETY / CONTROL")
 toggle("Anti Flip","Rights the vehicle if it rolls far enough to stop farming","antiFlip")
 button("↔ RESET / RE-LOCK CURRENT LANE",function()
-    S.baseLaneOffset=nil S.targetLaneOffset=nil S.targetTraffic=nil
-    S.status.drive="lane lock reset"
+    S.highwayOrigin=nil S.highwayForward=nil S.highwayRight=nil
+    S.baseLaneOffset=0 S.targetLaneOffset=0 S.laneOffset=nil
+    S.laneCenters={} S.dodge=nil S.targetTraffic=nil
+    S.status.drive="highway/lane lock reset"
 end)
 button("⇄ FLIP DRIVING DIRECTION",function()
     CFG.direction=CFG.direction*-1
-    S.baseLaneOffset=nil S.targetLaneOffset=nil
+    S.highwayOrigin=nil S.highwayForward=nil S.highwayRight=nil
+    S.baseLaneOffset=0 S.targetLaneOffset=0 S.laneOffset=nil
+    S.laneCenters={} S.dodge=nil
     save()
     S.status.drive=CFG.direction==1 and "direction: current traffic" or "direction: opposite"
 end)
@@ -727,6 +738,7 @@ task.spawn(function()
             "Auto Enter: "..tostring(S.status.enter or "armed"),
             "Drive: "..tostring(S.status.drive or "waiting"),
             "Lane: "..tostring(S.status.lane or "waiting"),
+            "Heading: "..tostring(S.status.heading or "locking current highway"),
             "Traffic: "..tostring(S.status.traffic or "scanning"),
             "Near Miss AI: "..tostring(S.status.nearMiss or "hunting traffic"),
             "MPH scale: "..tostring(S.status.scale or string.format("%.3f default",MPH_PER_STUD)),
