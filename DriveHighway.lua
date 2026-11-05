@@ -2,7 +2,7 @@
 -- Auto Drive + Force MPH + Near-Miss Weaving
 if not game:IsLoaded() then game.Loaded:Wait() end
 
-local VERSION="0.3.1"
+local VERSION="0.3.2"
 local GAME_ID=10768476566
 local ROOT_PLACE=120511086614436
 -- Do not hard-return here. The loader already routes this module, and we want the UI to
@@ -119,14 +119,14 @@ local function findVehicle()
     local seat=h.SeatPart
     if seat and seat:IsA("BasePart") then
         local model=seat:FindFirstAncestorOfClass("Model")
-        local root=(model and model.PrimaryPart) or seat.AssemblyRootPart or seat
+        local root=seat.AssemblyRootPart or (model and model.PrimaryPart) or seat
         return model,seat,root
     end
 
     for _,d in ipairs(workspace:GetDescendants()) do
         if d:IsA("VehicleSeat") and d.Occupant==h then
             local model=d:FindFirstAncestorOfClass("Model")
-            local root=(model and model.PrimaryPart) or d.AssemblyRootPart or d
+            local root=d.AssemblyRootPart or (model and model.PrimaryPart) or d
             return model,d,root
         end
     end
@@ -228,16 +228,9 @@ local function roadBasis(root)
     local part=rayRoad(root)
 
     if not S.highwayForward or not S.highwayRight or not S.highwayOrigin then
-        local carForward=unitFlat(root.CFrame.LookVector)
-        local axis=carForward
-
-        if part and part:IsA("BasePart") then
-            local roadAxis=part.Size.Z>=part.Size.X and unitFlat(part.CFrame.LookVector) or unitFlat(part.CFrame.RightVector)
-            if roadAxis:Dot(carForward)<0 then roadAxis=-roadAxis end
-            if roadAxis:Dot(carForward)>.72 then axis=roadAxis end
-        end
-
-        axis*=CFG.direction
+        -- The user is already lined up with the highway when Auto Drive is enabled.
+        -- Lock EXACTLY to the car's current facing; never derive heading from road-part axes.
+        local axis=unitFlat(root.CFrame.LookVector)*CFG.direction
         S.highwayForward=unitFlat(axis)
         S.highwayRight=Vector3.new(-S.highwayForward.Z,0,S.highwayForward.X)
         S.highwayOrigin=root.Position
@@ -433,7 +426,8 @@ end
 local function updateDodge(root,fwd,right,road,list)
     if not CFG.nearMiss then
         S.dodge=nil
-        return nearestCruiseLane(S.laneOffset or 0,road,list),"CRUISE"
+        S.targetTraffic=nil
+        return S.baseLaneOffset or 0,"CRUISE • LOCKED LANE"
     end
 
     if S.dodge and S.dodge.model then
@@ -461,7 +455,7 @@ local function updateDodge(root,fwd,right,road,list)
     end
 
     S.targetTraffic=nil
-    return nearestCruiseLane(S.laneOffset or 0,road,list),"CRUISE • hunting traffic"
+    return S.baseLaneOffset or 0,"CRUISE • LOCKED LANE • hunting traffic"
 end
 
 local function controlStep(dt)
@@ -510,28 +504,31 @@ local function controlStep(dt)
             S.status.recovery="blocked pass • easing speed"
         end
 
-        local steer=math.clamp(err/38,-.62,.62)
-        local desired=unitFlat(fwd+right*steer)
-        local forwardSpeed=CFG.forceSpeed and targetSpeed*speedScale or math.max(0,flat(current):Dot(desired))
+        -- Keep forward travel and lane correction separate. Previous builds tilted the velocity
+        -- vector toward +right/-right, which could become a permanent diagonal drive.
+        local forwardSpeed=CFG.forceSpeed and targetSpeed*speedScale or math.max(0,flat(current):Dot(fwd))
+        local lateralLimit=mphToStuds(math.min(CFG.maxLateralMph or 30,28))
+        local lateralSpeed=math.clamp(err*1.55,-lateralLimit,lateralLimit)
+        if math.abs(err)<0.35 then lateralSpeed=0 end
 
-        root.AssemblyLinearVelocity=desired*forwardSpeed+Vector3.new(0,current.Y,0)
+        root.AssemblyLinearVelocity=fwd*forwardSpeed + right*lateralSpeed + Vector3.new(0,current.Y,0)
 
-        -- Aim the chassis into the lane change instead of simply sliding sideways.
-        local headingErr=signedHeadingError(root.CFrame.LookVector,desired)
-        local av=root.AssemblyAngularVelocity
-        root.AssemblyAngularVelocity=Vector3.new(av.X,math.clamp(-headingErr*4.1,-2.8,2.8),av.Z)
-
-        if CFG.antiFlip then
-            local up=root.CFrame.UpVector
-            if up.Y<.55 then
-                local pos=root.Position
-                root.CFrame=CFrame.lookAt(pos,pos+desired,Vector3.yAxis)
-                root.AssemblyAngularVelocity=Vector3.zero
-                S.status.recovery="anti-flip corrected"
-            end
+        -- Kill the game's chassis steering/yaw while farming. The car stays pointed down the
+        -- locked highway; near-miss dodges are lateral translations, not permanent turns.
+        if seat then
+            pcall(function() seat.Steer=0 end)
+            pcall(function() seat.SteerFloat=0 end)
         end
+        root.AssemblyAngularVelocity=Vector3.zero
 
-        S.status.drive=string.format("%s • %.0f MPH • lane err %.1f",mode,CFG.targetMph,err)
+        local up=root.CFrame.UpVector
+        if CFG.antiFlip and up.Y<.55 then
+            S.status.recovery="anti-flip corrected"
+        end
+        local pos=root.Position
+        root.CFrame=CFrame.lookAt(pos,pos+fwd,Vector3.yAxis)
+
+        S.status.drive=string.format("%s • %.0f MPH • lane err %.1f • lateral %.1f",mode,CFG.targetMph,err,lateralSpeed)
     elseif CFG.forceSpeed then
         local current=root.AssemblyLinearVelocity
         local targetSpeed=mphToStuds(CFG.targetMph)
@@ -696,7 +693,7 @@ local function button(txt,fn)
 end
 
 section("DRIVING")
-toggle("Auto Drive","Holds the highway direction and lane automatically","autoDrive")
+toggle("Auto Drive","Hard-locks forward highway heading; only dodges sideways for traffic","autoDrive")
 toggle("Force Speed","Maintains the selected MPH even without holding W","forceSpeed")
 slider("Target Speed",20,350,"targetMph"," MPH")
 
