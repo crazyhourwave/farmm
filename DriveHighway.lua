@@ -2,7 +2,7 @@
 -- Auto Drive + Force MPH + Near-Miss Weaving
 if not game:IsLoaded() then game.Loaded:Wait() end
 
-local VERSION="0.2.2"
+local VERSION="0.3.0"
 local GAME_ID=10768476566
 local ROOT_PLACE=120511086614436
 -- Do not hard-return here. The loader already routes this module, and we want the UI to
@@ -24,7 +24,7 @@ end
 local S={
     VERSION=VERSION,alive=true,vehicle=nil,seat=nil,root=nil,roadPart=nil,
     laneOffset=nil,baseLaneOffset=nil,targetLaneOffset=nil,targetTraffic=nil,
-    nearMissSide=1,status={},lastTrafficScan=0,lastRoadScan=0
+    laneCenters={},dodge=nil,nearMissSide=1,status={},lastTrafficScan=0,lastRoadScan=0
 }
 _G.HOUR_DRIVE=S
 
@@ -36,8 +36,10 @@ local CFG={
     nearMiss=true,
     nearMissGap=5.5,
     antiFlip=true,
-    laneStrength=1.75,
-    maxLateralMph=42,
+    laneStrength=2.15,
+    maxLateralMph=52,
+    laneWidth=11.5,
+    dodgeLookahead=145,
     direction=1,
 }
 local FOLDER="HourHub_DRIVE"
@@ -275,9 +277,39 @@ local function vehicleLike(m)
     return true,cf,size
 end
 
-local function scanTraffic(root,fwd,right,road)
-    local best
-    local carCF,carSize=rootBounds(S.vehicle,root)
+local function roadHalfWidth(road)
+    if not road then return 28 end
+    local cross=road.Size.Z>=road.Size.X and road.Size.X or road.Size.Z
+    return math.max(8,cross*.5-4.5)
+end
+
+local function buildLaneCenters(road,current)
+    local half=roadHalfWidth(road)
+    local width=math.max(8.5,CFG.laneWidth or 11.5)
+    local usable=half*2
+    local count=math.max(1,math.floor(usable/width))
+    local actual=usable/count
+    local centers={}
+    for i=1,count do
+        centers[i]=-half+actual*(i-.5)
+    end
+    table.sort(centers)
+    S.laneCenters=centers
+
+    if current~=nil and #centers>0 then
+        local best,bd=centers[1],math.huge
+        for _,x in ipairs(centers) do
+            local d=math.abs(x-current)
+            if d<bd then best,bd=x,d end
+        end
+        return best
+    end
+    return centers[math.ceil(#centers/2)] or 0
+end
+
+local function trafficList(root,fwd,right,road)
+    local out={}
+    local _,carSize=rootBounds(S.vehicle,root)
     local carHalf=carSize and math.min(carSize.X,carSize.Z)*.5 or 3.2
 
     for _,m in ipairs(workspace:GetDescendants()) do
@@ -287,50 +319,101 @@ local function scanTraffic(root,fwd,right,road)
                 local rel=cf.Position-root.Position
                 local ahead=rel:Dot(fwd)
                 local lateral=rel:Dot(right)
-                if ahead>10 and ahead<190 and math.abs(lateral)<34 then
-                    local width=math.min(size.X,size.Z)
-                    local moving=false
+                if ahead>-35 and ahead<230 and math.abs(lateral)<roadHalfWidth(road)+18 then
                     local part=m.PrimaryPart or m:FindFirstChildWhichIsA("BasePart",true)
-                    if part then moving=flat(part.AssemblyLinearVelocity).Magnitude>4 end
-                    local score=ahead + math.abs(lateral)*2 + (moving and 0 or 45)
-                    if not best or score<best.score then
-                        best={model=m,pos=cf.Position,size=size,ahead=ahead,lateral=lateral,width=width,carHalf=carHalf,score=score}
-                    end
+                    local vel=part and flat(part.AssemblyLinearVelocity) or Vector3.zero
+                    table.insert(out,{
+                        model=m,pos=cf.Position,size=size,ahead=ahead,lateral=lateral,
+                        width=math.min(size.X,size.Z),length=math.max(size.X,size.Z),
+                        carHalf=carHalf,velocity=vel,
+                    })
                 end
             end
+        end
+    end
+    table.sort(out,function(a,b)return a.ahead<b.ahead end)
+    return out
+end
+
+local function trafficInfoFor(model,root,fwd,right)
+    if not model or not model.Parent then return end
+    local ok,cf,size=pcall(model.GetBoundingBox,model)
+    if not ok then return end
+    local rel=cf.Position-root.Position
+    return {
+        model=model,pos=cf.Position,size=size,
+        ahead=rel:Dot(fwd),lateral=rel:Dot(right),
+        width=math.min(size.X,size.Z),length=math.max(size.X,size.Z),
+    }
+end
+
+local function clampRoadOffset(off,road)
+    local half=roadHalfWidth(road)
+    return math.clamp(off,-half,half)
+end
+
+local function corridorRisk(off,list,ignore,road)
+    local risk=0
+    local half=roadHalfWidth(road)
+    local edge=half-math.abs(off)
+    if edge<4 then risk+=(4-edge)*180 end
+
+    for _,t in ipairs(list) do
+        if t.model~=ignore and t.ahead>-8 and t.ahead<105 then
+            local clearance=math.abs(off-t.lateral)-(t.width*.5+t.carHalf)
+            if clearance<2.5 then
+                risk+=(2.5-clearance)*1200 + math.max(0,105-t.ahead)*8
+            elseif clearance<7 then
+                risk+=(7-clearance)*90
+            end
+        end
+    end
+    return risk
+end
+
+local function nearestCruiseLane(current,road,list)
+    local centers=S.laneCenters
+    if #centers==0 then buildLaneCenters(road,current) centers=S.laneCenters end
+    local best,bestScore
+    for _,off in ipairs(centers) do
+        local score=math.abs(off-current)*2+corridorRisk(off,list,nil,road)
+        if not bestScore or score<bestScore then best,bestScore=off,score end
+    end
+    return best or current
+end
+
+local function chooseTarget(list,road)
+    local best,bestScore
+    for _,t in ipairs(list) do
+        if t.ahead>18 and t.ahead<(CFG.dodgeLookahead or 145) then
+            local score=t.ahead + math.abs(t.lateral-(S.laneOffset or 0))*.7
+            if not bestScore or score<bestScore then best,bestScore=t,score end
         end
     end
     return best
 end
 
-local function chooseNearMissLane(root,fwd,right,road,traffic)
-    if not traffic or not road then return S.baseLaneOffset end
-    local trafficOffset=laneOffsetFor(traffic.pos,road,right)
-    local trafficHalf=traffic.width*.5
-    local desiredGap=CFG.nearMissGap
-    local sep=trafficHalf+traffic.carHalf+desiredGap
+local function choosePassOffset(target,list,road)
+    if not target then return end
+    local sep=target.width*.5+target.carHalf+math.max(2,CFG.nearMissGap)
+    local left=clampRoadOffset(target.lateral-sep,road)
+    local rightOff=clampRoadOffset(target.lateral+sep,road)
 
-    local left=trafficOffset-sep
-    local rightOff=trafficOffset+sep
-    local current=S.laneOffset or S.baseLaneOffset or 0
+    local leftRisk=corridorRisk(left,list,target.model,road)
+    local rightRisk=corridorRisk(rightOff,list,target.model,road)
 
-    local chosen
-    if math.abs(left-current)<math.abs(rightOff-current) then chosen=left else chosen=rightOff end
-
-    -- Alternate side when both options are roughly equal so farming doesn't look robotic.
-    if math.abs(math.abs(left-current)-math.abs(rightOff-current))<3 then
-        chosen=S.nearMissSide<0 and left or rightOff
+    -- Prefer the lower-risk side. If both are nearly equal, alternate sides.
+    local chosen,side
+    if math.abs(leftRisk-rightRisk)<25 then
+        if S.nearMissSide<0 then chosen,side=left,-1 else chosen,side=rightOff,1 end
         S.nearMissSide=-S.nearMissSide
+    elseif leftRisk<rightRisk then
+        chosen,side=left,-1
+    else
+        chosen,side=rightOff,1
     end
-    return chosen
-end
 
-local function clampRoadOffset(off,road,fwd)
-    if not road then return off end
-    local cross=road.Size.Z>=road.Size.X and road.Size.X or road.Size.Z
-    local margin=5
-    local limit=math.max(4,cross*.5-margin)
-    return math.clamp(off,-limit,limit)
+    return chosen,side,math.min(leftRisk,rightRisk)
 end
 
 local function signedHeadingError(current,target)
@@ -339,6 +422,40 @@ local function signedHeadingError(current,target)
     local cross=c.X*t.Z-c.Z*t.X
     local dot=math.clamp(c:Dot(t),-1,1)
     return math.atan2(cross,dot)
+end
+
+local function updateDodge(root,fwd,right,road,list)
+    if not CFG.nearMiss then
+        S.dodge=nil
+        return nearestCruiseLane(S.laneOffset or 0,road,list),"CRUISE"
+    end
+
+    if S.dodge and S.dodge.model then
+        local t=trafficInfoFor(S.dodge.model,root,fwd,right)
+        if not t or t.ahead<-14 or os.clock()-(S.dodge.startedAt or 0)>6 then
+            S.status.nearMiss="PASS COMPLETE • recentering"
+            S.dodge=nil
+        else
+            S.targetTraffic=t
+            return clampRoadOffset(S.dodge.offset,road),
+                string.format("DODGE %s • %.0f studs",S.dodge.side<0 and "LEFT" or "RIGHT",t.ahead)
+        end
+    end
+
+    local target=chooseTarget(list,road)
+    if target then
+        local off,side,risk=choosePassOffset(target,list,road)
+        if off then
+            S.dodge={model=target.model,offset=off,side=side,startedAt=os.clock(),risk=risk}
+            S.targetTraffic=target
+            S.status.nearMiss=string.format("TARGET %s • pass %s • gap %.1f",
+                target.model.Name,side<0 and "LEFT" or "RIGHT",CFG.nearMissGap)
+            return off,string.format("DODGE %s • %.0f studs",side<0 and "LEFT" or "RIGHT",target.ahead)
+        end
+    end
+
+    S.targetTraffic=nil
+    return nearestCruiseLane(S.laneOffset or 0,road,list),"CRUISE • hunting traffic"
 end
 
 local function controlStep(dt)
@@ -354,48 +471,62 @@ local function controlStep(dt)
     local fwd,right,road=roadBasis(root)
     initLane(root,fwd,right,road)
 
-    if CFG.nearMiss and os.clock()-S.lastTrafficScan>.12 then
-        S.lastTrafficScan=os.clock()
-        S.targetTraffic=scanTraffic(root,fwd,right,road)
-        if S.targetTraffic then
-            S.targetLaneOffset=chooseNearMissLane(root,fwd,right,road,S.targetTraffic)
-            S.status.traffic=string.format("%s • %.0f studs ahead",S.targetTraffic.model.Name,S.targetTraffic.ahead)
-        else
-            S.targetLaneOffset=S.baseLaneOffset
-            S.status.traffic="clear"
-        end
-    elseif not CFG.nearMiss then
-        S.targetTraffic=nil
-        S.targetLaneOffset=S.baseLaneOffset
-        S.status.traffic="near-miss off"
+    if road and (#S.laneCenters==0 or S._laneRoad~=road) then
+        S._laneRoad=road
+        local snapped=buildLaneCenters(road,S.laneOffset or 0)
+        S.baseLaneOffset=snapped
+        S.targetLaneOffset=snapped
     end
 
-    local targetOff=clampRoadOffset(S.targetLaneOffset or S.baseLaneOffset or S.laneOffset or 0,road,fwd)
-    local err=targetOff-(S.laneOffset or 0)
+    local list={}
+    if os.clock()-S.lastTrafficScan>.08 then
+        S.lastTrafficScan=os.clock()
+        S._traffic=trafficList(root,fwd,right,road)
+    end
+    list=S._traffic or {}
+
+    local targetOff,mode=updateDodge(root,fwd,right,road,list)
+    S.targetLaneOffset=targetOff or S.baseLaneOffset or S.laneOffset or 0
+    S.status.traffic=S.targetTraffic and
+        string.format("%s • %.0f ahead",S.targetTraffic.model.Name,S.targetTraffic.ahead)
+        or string.format("clear • %d tracked",#list)
+
+    local target=clampRoadOffset(S.targetLaneOffset,road)
+    local err=target-(S.laneOffset or 0)
 
     if CFG.autoDrive then
-        local lateralMax=mphToStuds(CFG.maxLateralMph)
-        local lateral=math.clamp(err*CFG.laneStrength,-lateralMax,lateralMax)
         local current=root.AssemblyLinearVelocity
         local targetSpeed=mphToStuds(CFG.targetMph)
-        local forwardSpeed=CFG.forceSpeed and targetSpeed or math.max(0,flat(current):Dot(fwd))
-        root.AssemblyLinearVelocity=fwd*forwardSpeed + right*lateral + Vector3.new(0,current.Y,0)
 
-        local headingErr=signedHeadingError(root.CFrame.LookVector,fwd)
+        -- If both sides around the target are dangerously occupied, briefly ease off instead of ramming.
+        local speedScale=1
+        if S.dodge and (S.dodge.risk or 0)>1400 and S.targetTraffic and S.targetTraffic.ahead<48 then
+            speedScale=.70
+            S.status.recovery="blocked pass • easing speed"
+        end
+
+        local steer=math.clamp(err/38,-.62,.62)
+        local desired=unitFlat(fwd+right*steer)
+        local forwardSpeed=CFG.forceSpeed and targetSpeed*speedScale or math.max(0,flat(current):Dot(desired))
+
+        root.AssemblyLinearVelocity=desired*forwardSpeed+Vector3.new(0,current.Y,0)
+
+        -- Aim the chassis into the lane change instead of simply sliding sideways.
+        local headingErr=signedHeadingError(root.CFrame.LookVector,desired)
         local av=root.AssemblyAngularVelocity
-        root.AssemblyAngularVelocity=Vector3.new(av.X,math.clamp(-headingErr*3.2,-2.2,2.2),av.Z)
+        root.AssemblyAngularVelocity=Vector3.new(av.X,math.clamp(-headingErr*4.1,-2.8,2.8),av.Z)
 
         if CFG.antiFlip then
             local up=root.CFrame.UpVector
             if up.Y<.55 then
                 local pos=root.Position
-                root.CFrame=CFrame.lookAt(pos,pos+fwd,Vector3.yAxis)
+                root.CFrame=CFrame.lookAt(pos,pos+desired,Vector3.yAxis)
                 root.AssemblyAngularVelocity=Vector3.zero
                 S.status.recovery="anti-flip corrected"
             end
         end
 
-        S.status.drive=string.format("AUTO • target %.0f MPH • lane err %.1f",CFG.targetMph,err)
+        S.status.drive=string.format("%s • %.0f MPH • lane err %.1f",mode,CFG.targetMph,err)
     elseif CFG.forceSpeed then
         local current=root.AssemblyLinearVelocity
         local targetSpeed=mphToStuds(CFG.targetMph)
@@ -407,7 +538,7 @@ local function controlStep(dt)
     end
 
     S.status.actual=studsToMph(flat(root.AssemblyLinearVelocity).Magnitude)
-    S.status.lane=string.format("%.1f -> %.1f",S.laneOffset or 0,targetOff)
+    S.status.lane=string.format("%.1f -> %.1f • %d lanes",S.laneOffset or 0,target,#S.laneCenters)
 end
 
 local conn=RunService.Heartbeat:Connect(function(dt)
@@ -597,6 +728,7 @@ task.spawn(function()
             "Drive: "..tostring(S.status.drive or "waiting"),
             "Lane: "..tostring(S.status.lane or "waiting"),
             "Traffic: "..tostring(S.status.traffic or "scanning"),
+            "Near Miss AI: "..tostring(S.status.nearMiss or "hunting traffic"),
             "MPH scale: "..tostring(S.status.scale or string.format("%.3f default",MPH_PER_STUD)),
             "Recovery: "..tostring(S.status.recovery or "idle"),
             S.status.error and ("Error: "..S.status.error) or "",
