@@ -130,7 +130,7 @@ task.spawn(function()
             S.status.speed="waiting"
         end
 
-        task.wait(.05)
+        task.wait(.08)
     end
 end)
 
@@ -368,7 +368,7 @@ task.spawn(function()
             "Speed: "..tostring(S.status.speed or "waiting"),
             "Anti-Flip: "..tostring(S.status.flip or (CFG.antiFlip and "armed" or "off")),
         },"\n")
-        task.wait(.35)
+        task.wait(.5)
     end
 end)
 
