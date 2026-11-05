@@ -1,14 +1,20 @@
 -- Hour Hub - Multi-Game Loader v1.0.0
 if not game:IsLoaded() then game.Loaded:Wait() end
 
-local VERSION="1.0.1"
+local VERSION="1.1.0"
 local RAW="https://raw.githubusercontent.com/crazyhourwave/farmm/main/"
 local PLACE=game.PlaceId
+local GAME_ID=game.GameId
 local ROUTES={
     [111053011787075]={name="Candy Kingdom Defense",file="Farm.lua"},
     [90286053025127]={name="Candy Kingdom Defense",file="Farm.lua"},
     [95568014894521]={name="Angry Birds Tower Defense",file="AngryBirds.lua"},
+    [120511086614436]={name="DRIVE: Highway",file="DriveHighway.lua"},
 }
+local GAME_ROUTES={
+    [10768476566]={name="DRIVE: Highway",file="DriveHighway.lua"},
+}
+local route=ROUTES[PLACE] or GAME_ROUTES[GAME_ID]
 
 local old=_G.HOUR_HUB
 if old and old.alive then
@@ -19,16 +25,22 @@ if old and old.alive then
     pcall(function() if old.unload then old.unload() else old.alive=false end end)
 end
 
-local H={VERSION=VERSION,alive=true,place=PLACE,route=ROUTES[PLACE]}
+local H={VERSION=VERSION,alive=true,place=PLACE,gameId=GAME_ID,route=route}
 _G.HOUR_HUB=H
 
 function H.toggleMenu()
+    if _G.HOUR_DRIVE and _G.HOUR_DRIVE.alive and type(_G.HOUR_DRIVE.toggleMenu)=="function" then
+        return _G.HOUR_DRIVE.toggleMenu()
+    end
     if _G.HOUR_ABTD and _G.HOUR_ABTD.alive and type(_G.HOUR_ABTD.toggleMenu)=="function" then
         return _G.HOUR_ABTD.toggleMenu()
     end
     return false
 end
 function H.setMenuVisible(v)
+    if _G.HOUR_DRIVE and _G.HOUR_DRIVE.alive and type(_G.HOUR_DRIVE.setMenuVisible)=="function" then
+        return _G.HOUR_DRIVE.setMenuVisible(v)
+    end
     if _G.HOUR_ABTD and _G.HOUR_ABTD.alive and type(_G.HOUR_ABTD.setMenuVisible)=="function" then
         return _G.HOUR_ABTD.setMenuVisible(v)
     end
@@ -38,10 +50,10 @@ function H.unload()
     H.alive=false
     pcall(function() if _G.CKD_SF and _G.CKD_SF.unload then _G.CKD_SF.unload() end end)
     pcall(function() if _G.HOUR_ABTD and _G.HOUR_ABTD.unload then _G.HOUR_ABTD.unload() end end)
+    pcall(function() if _G.HOUR_DRIVE and _G.HOUR_DRIVE.unload then _G.HOUR_DRIVE.unload() end end)
     if _G.HOUR_HUB==H then _G.HOUR_HUB=nil end
 end
 
-local route=ROUTES[PLACE]
 if route then
     local ok,src=pcall(function() return game:HttpGet(RAW..route.file.."?force="..tostring(os.time())) end)
     if not ok or type(src)~="string" or #src<500 then
@@ -62,7 +74,7 @@ else
     local c=Instance.new("UICorner")c.CornerRadius=UDim.new(0,16)c.Parent=f
     local s=Instance.new("UIStroke")s.Color=Color3.fromRGB(255,97,72)s.Transparency=.35 s.Parent=f
     local t=Instance.new("TextLabel")t.BackgroundTransparency=1 t.Position=UDim2.fromOffset(22,18)t.Size=UDim2.new(1,-44,0,34)t.Font=Enum.Font.GothamBlack t.TextSize=20 t.TextColor3=Color3.fromRGB(255,255,255)t.TextXAlignment=Enum.TextXAlignment.Left t.Text="HOUR HUB // UNSUPPORTED GAME"t.Parent=f
-    local b=Instance.new("TextLabel")b.BackgroundTransparency=1 b.Position=UDim2.fromOffset(22,64)b.Size=UDim2.new(1,-44,0,112)b.Font=Enum.Font.Gotham b.TextSize=13 b.TextWrapped=true b.TextYAlignment=Enum.TextYAlignment.Top b.TextXAlignment=Enum.TextXAlignment.Left b.TextColor3=Color3.fromRGB(190,190,205)b.Text="PlaceId: "..tostring(PLACE).."\n\nSupported:\n• Candy Kingdom Defense\n• Angry Birds Tower Defense [BETA]\n\nUse the same Hub.lua loader in either game."b.Parent=f
+    local b=Instance.new("TextLabel")b.BackgroundTransparency=1 b.Position=UDim2.fromOffset(22,64)b.Size=UDim2.new(1,-44,0,112)b.Font=Enum.Font.Gotham b.TextSize=13 b.TextWrapped=true b.TextYAlignment=Enum.TextYAlignment.Top b.TextXAlignment=Enum.TextXAlignment.Left b.TextColor3=Color3.fromRGB(190,190,205)b.Text="PlaceId: "..tostring(PLACE).."\n\nSupported:\n• Candy Kingdom Defense\n• Angry Birds Tower Defense [BETA]\n• DRIVE: Highway\n\nUse the same Hub.lua loader in any supported game."b.Parent=f
 end
 
 pcall(function()
