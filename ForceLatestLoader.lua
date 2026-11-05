@@ -3,14 +3,65 @@
 
 if not game:IsLoaded() then game.Loaded:Wait() end
 
+local EXPECT_DRIVE="0.2.0"
 if game.GameId==10768476566 or game.PlaceId==120511086614436 then
     local pg=game:GetService("Players").LocalPlayer:FindFirstChildOfClass("PlayerGui")
     local dr=rawget(_G,"HOUR_DRIVE")
     local gui=pg and pg:FindFirstChild("HourHub_DRIVE")
-    if dr and dr.alive and gui and gui:IsA("ScreenGui") and type(dr.toggleMenu)=="function" then
-        pcall(dr.toggleMenu)
+
+    if dr and dr.alive and tostring(dr.VERSION)==EXPECT_DRIVE and gui and gui:IsA("ScreenGui") then
+        gui.Enabled=not gui.Enabled
+        print("[Hour Hub] DRIVE menu "..(gui.Enabled and "OPENED" or "CLOSED").." directly")
         return
     end
+
+    pcall(function() if _G.HOUR_HUB and _G.HOUR_HUB.unload then _G.HOUR_HUB.unload() end end)
+    pcall(function() if dr and dr.unload then dr.unload() end end)
+    _G.HOUR_HUB=nil
+    _G.HOUR_DRIVE=nil
+    pcall(function()
+        if gui then gui:Destroy() end
+    end)
+    task.wait(.1)
+
+    local url="https://raw.githubusercontent.com/crazyhourwave/farmm/5853fd5bb1e0a92642a8ffa4471fac23cfc6638a/DriveHighway.lua?force="..tostring(os.clock()).."_"..tostring(math.random(100000,999999))
+    local ok,src=pcall(function() return game:HttpGet(url) end)
+    if not ok or type(src)~="string" or #src<1000 then
+        warn("[Hour Hub] DRIVE direct download failed: "..tostring(src))
+        return
+    end
+
+    local got=src:match('local%s+VERSION%s*=%s*"([^"]+)"')
+    if got~=EXPECT_DRIVE then
+        warn("[Hour Hub] REFUSED DRIVE source: expected v"..EXPECT_DRIVE..", got "..tostring(got))
+        return
+    end
+
+    local fn,err=loadstring(src,"=HourHub/DRIVE_v"..EXPECT_DRIVE)
+    if not fn then
+        warn("[Hour Hub] DRIVE compile failed: "..tostring(err))
+        return
+    end
+    local ran,rerr=pcall(fn)
+    if not ran then
+        warn("[Hour Hub] DRIVE runtime failed: "..tostring(rerr))
+        return
+    end
+
+    local H={VERSION="1.1.1",alive=true,place=game.PlaceId,gameId=game.GameId,route={name="DRIVE: Highway",file="DriveHighway.lua"}}
+    function H.toggleMenu()
+        local g=pg and pg:FindFirstChild("HourHub_DRIVE")
+        if g and g:IsA("ScreenGui") then g.Enabled=not g.Enabled return g.Enabled end
+        return false
+    end
+    function H.unload()
+        H.alive=false
+        pcall(function() if _G.HOUR_DRIVE and _G.HOUR_DRIVE.unload then _G.HOUR_DRIVE.unload() end end)
+        if _G.HOUR_HUB==H then _G.HOUR_HUB=nil end
+    end
+    _G.HOUR_HUB=H
+    print("[Hour Hub] DIRECT DRIVE active v"..EXPECT_DRIVE)
+    return
 end
 
 -- ABTD: bypass Hub.lua completely so stale hub instances/caches cannot preserve an old module.
